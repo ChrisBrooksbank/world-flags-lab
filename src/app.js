@@ -2,6 +2,8 @@ const DATA_URL = "./public/data/countries.json";
 const STORE_KEY = "world-flags-lab-progress-v1";
 
 const app = document.querySelector("#app");
+let globeRuntime = null;
+let globeBootId = 0;
 
 const state = {
   countries: [],
@@ -12,6 +14,8 @@ const state = {
   region: "All",
   scope: "core",
   query: "",
+  globeIso: "",
+  globeMode: "flags",
   progress: loadProgress(),
   quiz: null,
   match: null
@@ -22,6 +26,7 @@ const viewLabels = [
   ["learn", "Learn"],
   ["practice", "Practice"],
   ["test", "Test"],
+  ["globe", "Globe"],
   ["atlas", "Atlas"],
   ["progress", "Progress"],
   ["settings", "Settings"]
@@ -109,7 +114,9 @@ function regions() {
 }
 
 function render() {
+  disposeGlobe();
   state.filtered = filteredCountries();
+  if (!state.globeIso && state.filtered[0]) state.globeIso = dailyCountry(eligibleCountries()).iso3;
   app.innerHTML = `
     <div class="shell ${state.progress.settings.reducedMotion ? "reduced-motion" : ""}">
       <header class="topbar">
@@ -125,6 +132,7 @@ function render() {
     </div>
   `;
   wireDynamicPieces();
+  if (state.view === "globe" && !state.detailIso && !state.quiz && !state.match) initGlobe();
 }
 
 function renderView() {
@@ -138,6 +146,8 @@ function renderView() {
       return renderPractice();
     case "test":
       return renderTest();
+    case "globe":
+      return renderGlobe();
     case "atlas":
       return renderAtlas();
     case "progress":
@@ -262,6 +272,62 @@ function renderTest() {
         <p>Uses the selected region and active data scope.</p>
         <button class="primary" data-start-quiz="multiple" data-kind="test">Start Region Exam</button>
       </article>
+    </section>
+  `;
+}
+
+function renderGlobe() {
+  const pool = state.filtered.length ? state.filtered : eligibleCountries();
+  const selected = state.countryByIso.get(state.globeIso) || dailyCountry(pool);
+  const sameRegion = pool
+    .filter((country) => country.region === selected.region && country.iso3 !== selected.iso3)
+    .slice(0, 8);
+  return `
+    <section class="globe-page">
+      <div class="globe-toolbar">
+        <div>
+          <p class="eyebrow">Globe Explorer</p>
+          <h1>Spin the world, then tap a country marker.</h1>
+        </div>
+        <div class="globe-controls">
+          <label>
+            <span>Markers</span>
+            <select data-globe-mode>
+              <option value="flags" ${state.globeMode === "flags" ? "selected" : ""}>Flags</option>
+              <option value="mastery" ${state.globeMode === "mastery" ? "selected" : ""}>Mastery</option>
+              <option value="weak" ${state.globeMode === "weak" ? "selected" : ""}>Weak flags</option>
+            </select>
+          </label>
+          ${renderFilters()}
+        </div>
+      </div>
+      <div class="globe-layout">
+        <div class="globe-stage">
+          <div id="globe-canvas" class="globe-canvas" data-countries="${escapeAttr(JSON.stringify(pool.map(globeCountryPayload)))}" data-selected="${selected.iso3}" data-mode="${state.globeMode}">
+            <div class="globe-loading">Loading globe...</div>
+          </div>
+          <div class="globe-hint">Drag to rotate. Tap a marker to inspect its flag.</div>
+        </div>
+        <aside class="globe-card">
+          <span class="pill">${selected.region}${selected.subregion ? ` / ${selected.subregion}` : ""}</span>
+          ${flagImg(selected, "globe-flag")}
+          <h2>${selected.nameCommon}</h2>
+          <p>${selected.memoryHint}</p>
+          <div class="fact-grid compact-facts">
+            <div>Capital: ${selected.capital || "Not listed"}</div>
+            <div>Mastery: ${masteryFor(selected.iso3)}%</div>
+            <div>Entity: ${selected.entityType}</div>
+          </div>
+          <div class="actions">
+            <button class="primary" data-detail="${selected.iso3}">Open Card</button>
+            <button data-start-quiz="map" data-kind="practice" data-seed="${selected.iso3}">Locate</button>
+          </div>
+          <h3>Nearby Study Set</h3>
+          <div class="flag-strip">
+            ${sameRegion.map((country) => `<button data-globe-select="${country.iso3}">${flagImg(country, "thumb")}<span>${country.nameCommon}</span></button>`).join("")}
+          </div>
+        </aside>
+      </div>
     </section>
   `;
 }
@@ -642,6 +708,215 @@ function interactiveMap(question) {
       ${question.click ? `<span class="click-dot" style="${click}"></span>` : ""}
     </button>
   `;
+}
+
+function globeCountryPayload(country) {
+  return {
+    iso3: country.iso3,
+    name: country.nameCommon,
+    lat: Number(country.mapLat),
+    lng: Number(country.mapLng),
+    region: country.region,
+    mastery: masteryFor(country.iso3),
+    weak: progressFor(country.iso3).wrong
+  };
+}
+
+async function initGlobe() {
+  const bootId = ++globeBootId;
+  const host = document.querySelector("#globe-canvas");
+  if (!host) return;
+
+  const countries = JSON.parse(host.dataset.countries || "[]");
+  const selectedIso = host.dataset.selected;
+  const mode = host.dataset.mode;
+  const THREE = await import("../vendor/three.module.js");
+  if (bootId !== globeBootId || !document.body.contains(host)) return;
+
+  host.innerHTML = "";
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+  camera.position.set(0, 0, 7.2);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  host.appendChild(renderer.domElement);
+
+  const globe = new THREE.Group();
+  scene.add(globe);
+
+  const radius = 2.35;
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 96, 64),
+    new THREE.MeshStandardMaterial({
+      color: 0x1b6f8c,
+      roughness: 0.82,
+      metalness: 0.02
+    })
+  );
+  globe.add(sphere);
+
+  const atmosphere = new THREE.Mesh(
+    new THREE.SphereGeometry(radius * 1.018, 96, 64),
+    new THREE.MeshBasicMaterial({ color: 0x9ed8e8, transparent: true, opacity: 0.12 })
+  );
+  globe.add(atmosphere);
+
+  addGlobeGuides(THREE, globe, radius);
+
+  const markerGroup = new THREE.Group();
+  const markerGeometry = new THREE.SphereGeometry(0.036, 12, 12);
+  for (const country of countries) {
+    const position = latLngToVector(country.lat, country.lng, radius + 0.055, THREE);
+    const marker = new THREE.Mesh(markerGeometry, new THREE.MeshBasicMaterial({ color: markerColor(country, mode, selectedIso) }));
+    marker.position.copy(position);
+    marker.userData.iso3 = country.iso3;
+    marker.scale.setScalar(country.iso3 === selectedIso ? 2.05 : markerScale(country, mode));
+    markerGroup.add(marker);
+  }
+  globe.add(markerGroup);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 1.8));
+  const key = new THREE.DirectionalLight(0xffffff, 2.7);
+  key.position.set(4, 3, 6);
+  scene.add(key);
+
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  const drag = { active: false, x: 0, y: 0, moved: 0 };
+
+  function resize() {
+    const rect = host.getBoundingClientRect();
+    const width = Math.max(320, rect.width);
+    const height = Math.max(380, rect.height);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height, false);
+  }
+
+  function pointerToNdc(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+  }
+
+  function onPointerDown(event) {
+    drag.active = true;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    drag.moved = 0;
+    renderer.domElement.setPointerCapture?.(event.pointerId);
+  }
+
+  function onPointerMove(event) {
+    if (!drag.active) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    globe.rotation.y += dx * 0.007;
+    globe.rotation.x = clamp(globe.rotation.x + dy * 0.006, -1.15, 1.15);
+  }
+
+  function onPointerUp(event) {
+    if (!drag.active) return;
+    drag.active = false;
+    renderer.domElement.releasePointerCapture?.(event.pointerId);
+    if (drag.moved > 8) return;
+    pointerToNdc(event);
+    raycaster.setFromCamera(pointer, camera);
+    const hit = raycaster.intersectObjects(markerGroup.children, false)[0];
+    if (hit?.object?.userData?.iso3) {
+      state.globeIso = hit.object.userData.iso3;
+      render();
+    }
+  }
+
+  renderer.domElement.addEventListener("pointerdown", onPointerDown);
+  renderer.domElement.addEventListener("pointermove", onPointerMove);
+  renderer.domElement.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("resize", resize);
+
+  let frame = 0;
+  function animate() {
+    if (bootId !== globeBootId) return;
+    frame = requestAnimationFrame(animate);
+    if (!drag.active && !state.progress.settings.reducedMotion) globe.rotation.y += 0.0018;
+    renderer.render(scene, camera);
+  }
+
+  resize();
+  animate();
+
+  globeRuntime = {
+    stop() {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", resize);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      markerGeometry.dispose();
+      scene.traverse((object) => {
+        object.geometry?.dispose?.();
+        if (object.material) {
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach((material) => material.dispose?.());
+        }
+      });
+      renderer.dispose();
+    }
+  };
+}
+
+function disposeGlobe() {
+  globeBootId += 1;
+  if (globeRuntime) {
+    globeRuntime.stop();
+    globeRuntime = null;
+  }
+}
+
+function addGlobeGuides(THREE, globe, radius) {
+  const lineMaterial = new THREE.LineBasicMaterial({ color: 0xd6f3ee, transparent: true, opacity: 0.32 });
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const points = [];
+    for (let lng = -180; lng <= 180; lng += 4) points.push(latLngToVector(lat, lng, radius + 0.012, THREE));
+    globe.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
+  }
+  for (let lng = -150; lng <= 180; lng += 30) {
+    const points = [];
+    for (let lat = -84; lat <= 84; lat += 4) points.push(latLngToVector(lat, lng, radius + 0.014, THREE));
+    globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
+  }
+}
+
+function latLngToVector(lat, lng, radius, THREE) {
+  const phi = (90 - lat) * (Math.PI / 180);
+  const theta = (lng + 180) * (Math.PI / 180);
+  return new THREE.Vector3(
+    -radius * Math.sin(phi) * Math.cos(theta),
+    radius * Math.cos(phi),
+    radius * Math.sin(phi) * Math.sin(theta)
+  );
+}
+
+function markerColor(country, mode, selectedIso) {
+  if (country.iso3 === selectedIso) return 0xf2b84b;
+  if (mode === "mastery") {
+    if (country.mastery >= 80) return 0x35c275;
+    if (country.mastery >= 35) return 0xf2b84b;
+    return 0xf24c3d;
+  }
+  if (mode === "weak") return country.weak > 0 || country.mastery < 25 ? 0xf24c3d : 0x9ed8e8;
+  return 0xffffff;
+}
+
+function markerScale(country, mode) {
+  if (mode === "weak" && (country.weak > 0 || country.mastery < 25)) return 1.55;
+  if (mode === "mastery" && country.mastery >= 80) return 1.45;
+  return 1;
 }
 
 function mapPosition(country) {
@@ -1056,6 +1331,18 @@ function wireDynamicPieces() {
       input.focus();
       input.setSelectionRange(nextQuery.length, nextQuery.length);
     }
+  });
+
+  document.querySelector("[data-globe-mode]")?.addEventListener("change", (event) => {
+    state.globeMode = event.target.value;
+    render();
+  });
+
+  document.querySelectorAll("[data-globe-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.globeIso = button.dataset.globeSelect;
+      render();
+    });
   });
 
   document.querySelectorAll("[data-start-quiz]").forEach((button) => {

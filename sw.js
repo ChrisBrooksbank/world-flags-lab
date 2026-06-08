@@ -1,4 +1,4 @@
-const CACHE_NAME = "world-flags-lab-v1";
+const CACHE_NAME = "world-flags-lab-v2";
 const CORE_ASSETS = [
   "./",
   "./index.html",
@@ -6,6 +6,7 @@ const CORE_ASSETS = [
   "./icons/icon.svg",
   "./src/app.js",
   "./src/styles.css",
+  "./vendor/three.module.js",
   "./public/data/countries.json"
 ];
 
