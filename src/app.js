@@ -1,4 +1,5 @@
 const DATA_URL = "./public/data/countries.json";
+const COUNTRY_BOUNDS_URL = "./public/maps/countries.geojson";
 const STORE_KEY = "world-flags-lab-progress-v1";
 
 const app = document.querySelector("#app");
@@ -730,8 +731,18 @@ async function initGlobe() {
   const countries = JSON.parse(host.dataset.countries || "[]");
   const selectedIso = host.dataset.selected;
   const mode = host.dataset.mode;
-  const THREE = await import("../vendor/three.module.js");
+  const [THREE, boundsResponse] = await Promise.all([
+    import("../vendor/three.module.js"),
+    fetch(COUNTRY_BOUNDS_URL)
+  ]);
+  let countryBounds = null;
+  try {
+    countryBounds = boundsResponse.ok ? await boundsResponse.json() : null;
+  } catch (error) {
+    host.dataset.outlineError = error.message;
+  }
   if (bootId !== globeBootId || !document.body.contains(host)) return;
+  const selectedCountry = countries.find((country) => country.iso3 === selectedIso) || countries[0];
 
   host.innerHTML = "";
   const scene = new THREE.Scene();
@@ -744,13 +755,17 @@ async function initGlobe() {
   host.appendChild(renderer.domElement);
 
   const globe = new THREE.Group();
+  if (selectedCountry) {
+    globe.rotation.y = THREE.MathUtils.degToRad(-(selectedCountry.lng + 90));
+    globe.rotation.x = THREE.MathUtils.degToRad(clamp(selectedCountry.lat * 0.45, -34, 34));
+  }
   scene.add(globe);
 
   const radius = 2.35;
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 96, 64),
     new THREE.MeshStandardMaterial({
-      color: 0x1b6f8c,
+      color: 0x17677d,
       roughness: 0.82,
       metalness: 0.02
     })
@@ -764,6 +779,14 @@ async function initGlobe() {
   globe.add(atmosphere);
 
   addGlobeGuides(THREE, globe, radius);
+  if (countryBounds) {
+    try {
+      addCountryOutlines(THREE, globe, radius, countryBounds);
+    } catch (error) {
+      host.dataset.outlineError = error.message;
+    }
+  }
+  host.dataset.outlineObjects = String(globe.getObjectByName("country-outlines")?.children.length || 0);
 
   const markerGroup = new THREE.Group();
   const markerGeometry = new THREE.SphereGeometry(0.036, 12, 12);
@@ -882,14 +905,86 @@ function addGlobeGuides(THREE, globe, radius) {
   const lineMaterial = new THREE.LineBasicMaterial({ color: 0xd6f3ee, transparent: true, opacity: 0.32 });
   for (let lat = -60; lat <= 60; lat += 30) {
     const points = [];
-    for (let lng = -180; lng <= 180; lng += 4) points.push(latLngToVector(lat, lng, radius + 0.012, THREE));
+    for (let lng = -180; lng <= 180; lng += 4) points.push(latLngToVector(lat, lng, radius + 0.09, THREE));
     globe.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
   }
   for (let lng = -150; lng <= 180; lng += 30) {
     const points = [];
-    for (let lat = -84; lat <= 84; lat += 4) points.push(latLngToVector(lat, lng, radius + 0.014, THREE));
+    for (let lat = -84; lat <= 84; lat += 4) points.push(latLngToVector(lat, lng, radius + 0.09, THREE));
     globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
   }
+}
+
+function addCountryOutlines(THREE, globe, radius, geojson) {
+  const outlineMaterial = new THREE.LineBasicMaterial({
+    color: 0xf7faf7,
+    transparent: true,
+    opacity: 0.86,
+    depthTest: true
+  });
+  const coastMaterial = new THREE.LineBasicMaterial({
+    color: 0xb8f6df,
+    transparent: true,
+    opacity: 0.5,
+    depthTest: true
+  });
+  const outlineGroup = new THREE.Group();
+  outlineGroup.name = "country-outlines";
+
+  for (const feature of geojson.features || []) {
+    const geometry = feature.geometry;
+    if (!geometry) continue;
+    const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.type === "MultiPolygon" ? geometry.coordinates : [];
+    for (const polygon of polygons) {
+      polygon.forEach((ring, index) => {
+        if (!Array.isArray(ring) || ring.length < 2) return;
+        const segments = splitRingAtDateline(ring);
+        for (const segment of segments) {
+          if (segment.length < 2) continue;
+          const points = densifyRing(segment, 3).map(([lng, lat]) => latLngToVector(lat, lng, radius + 0.12, THREE));
+          const geometryLine = new THREE.BufferGeometry().setFromPoints(points);
+          outlineGroup.add(new THREE.Line(geometryLine, index === 0 ? outlineMaterial : coastMaterial));
+        }
+      });
+    }
+  }
+
+  globe.add(outlineGroup);
+}
+
+function splitRingAtDateline(ring) {
+  const segments = [];
+  let current = [];
+  for (let index = 0; index < ring.length; index += 1) {
+    const point = ring[index];
+    const previous = ring[index - 1];
+    if (previous && Math.abs(point[0] - previous[0]) > 180) {
+      if (current.length > 1) segments.push(current);
+      current = [point];
+    } else {
+      current.push(point);
+    }
+  }
+  if (current.length > 1) segments.push(current);
+  return segments;
+}
+
+function densifyRing(ring, maxStepDegrees) {
+  const points = [];
+  for (let index = 0; index < ring.length - 1; index += 1) {
+    const start = ring[index];
+    const end = ring[index + 1];
+    const steps = Math.max(
+      1,
+      Math.ceil(Math.max(Math.abs(end[0] - start[0]), Math.abs(end[1] - start[1])) / maxStepDegrees)
+    );
+    for (let step = 0; step < steps; step += 1) {
+      const t = step / steps;
+      points.push([start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t]);
+    }
+  }
+  points.push(ring[ring.length - 1]);
+  return points;
 }
 
 function latLngToVector(lat, lng, radius, THREE) {

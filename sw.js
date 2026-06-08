@@ -1,13 +1,14 @@
-const CACHE_NAME = "world-flags-lab-v2";
+const CACHE_NAME = "world-flags-lab-v3";
 const CORE_ASSETS = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icons/icon.svg",
-  "./src/app.js",
-  "./src/styles.css",
+  "./src/app.js?v=3",
+  "./src/styles.css?v=3",
   "./vendor/three.module.js",
-  "./public/data/countries.json"
+  "./public/data/countries.json",
+  "./public/maps/countries.geojson"
 ];
 
 self.addEventListener("install", (event) => {
