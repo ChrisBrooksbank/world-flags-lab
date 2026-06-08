@@ -18,6 +18,7 @@ const state = {
   globeIso: "",
   globeMode: "flags",
   globeSpin: false,
+  globeCallout: null,
   progress: loadProgress(),
   quiz: null,
   match: null
@@ -283,6 +284,7 @@ function renderTest() {
 function renderGlobe() {
   const pool = state.filtered.length ? state.filtered : eligibleCountries();
   const selected = state.countryByIso.get(state.globeIso) || dailyCountry(pool);
+  const calloutCountry = state.globeCallout ? state.countryByIso.get(state.globeCallout.iso3) : null;
   const sameRegion = pool
     .filter((country) => country.region === selected.region && country.iso3 !== selected.iso3)
     .slice(0, 8);
@@ -315,6 +317,14 @@ function renderGlobe() {
           </div>
           <div class="globe-hint">Drag to rotate. Tap a marker to inspect its flag. Spin is optional.</div>
           <div class="globe-selected">Selected: <strong>${selected.nameCommon}</strong></div>
+          ${
+            calloutCountry
+              ? `<div class="globe-pop" style="left:${state.globeCallout.x}%;top:${state.globeCallout.y}%" data-pop-key="${state.globeCallout.key}">
+                  ${flagImg(calloutCountry, "globe-pop-flag")}
+                  <strong>${calloutCountry.nameCommon}</strong>
+                </div>`
+              : ""
+          }
         </div>
         <aside class="globe-card">
           <span class="pill">${selected.region}${selected.subregion ? ` / ${selected.subregion}` : ""}</span>
@@ -751,6 +761,7 @@ async function initGlobe() {
   }
   if (bootId !== globeBootId || !document.body.contains(host)) return;
   const selectedCountry = countries.find((country) => country.iso3 === selectedIso) || countries[0];
+  const surfacePicker = countryBounds ? buildCountrySurfacePicker(countryBounds, countries) : null;
 
   host.innerHTML = "";
   const scene = new THREE.Scene();
@@ -832,6 +843,7 @@ async function initGlobe() {
   const pointer = new THREE.Vector2();
   const markerWorldPosition = new THREE.Vector3();
   const markerScreenPosition = new THREE.Vector3();
+  const sphereLocalPoint = new THREE.Vector3();
   const drag = { active: false, x: 0, y: 0, moved: 0 };
 
   function resize() {
@@ -876,10 +888,14 @@ async function initGlobe() {
     pointerToNdc(event);
     raycaster.setFromCamera(pointer, camera);
     const hit = firstVisibleMarkerHit(raycaster.intersectObjects(hitGroup.children, false), markerWorldPosition);
-    const fallbackIso = hit?.object?.userData?.iso3 || nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition);
+    const sphereHit = hit ? null : raycaster.intersectObject(sphere, false)[0];
+    const surfaceIso = sphereHit && surfacePicker ? countryIsoFromSphereHit(sphereHit, globe, surfacePicker, sphereLocalPoint) : "";
+    const fallbackIso =
+      hit?.object?.userData?.iso3 ||
+      surfaceIso ||
+      nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition);
     if (fallbackIso) {
-      state.globeIso = fallbackIso;
-      render();
+      selectGlobeCountry(fallbackIso, event, renderer);
     }
   }
 
@@ -1025,6 +1041,16 @@ function latLngToVector(lat, lng, radius, THREE) {
   );
 }
 
+function vectorToLatLng(vector) {
+  const normalized = vector.clone().normalize();
+  const lat = Math.asin(normalized.y) * (180 / Math.PI);
+  const theta = Math.atan2(normalized.z, -normalized.x) * (180 / Math.PI);
+  let lng = theta - 180;
+  if (lng < -180) lng += 360;
+  if (lng > 180) lng -= 360;
+  return { lat, lng };
+}
+
 function markerColor(country, mode, selectedIso) {
   if (country.iso3 === selectedIso) return 0xf2b84b;
   if (mode === "mastery") {
@@ -1048,6 +1074,114 @@ function firstVisibleMarkerHit(intersections, worldPosition) {
     if (worldPosition.z > 0.18) return hit;
   }
   return null;
+}
+
+function selectGlobeCountry(iso3, event, renderer) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = clamp(((event.clientX - rect.left) / rect.width) * 100, 4, 96);
+  const y = clamp(((event.clientY - rect.top) / rect.height) * 100, 5, 95);
+  state.globeIso = iso3;
+  state.globeCallout = { iso3, x, y, key: Date.now() };
+  render();
+}
+
+function countryIsoFromSphereHit(hit, globe, picker, scratch) {
+  scratch.copy(hit.point);
+  globe.worldToLocal(scratch);
+  const { lat, lng } = vectorToLatLng(scratch);
+  return picker(lat, lng);
+}
+
+function buildCountrySurfacePicker(geojson, countries) {
+  const isoByName = buildCountryNameLookup(countries);
+  const features = (geojson.features || [])
+    .map((feature) => ({
+      iso3: isoByName.get(normalizeCountryName(feature.properties?.name || "")) || "",
+      geometry: feature.geometry
+    }))
+    .filter((feature) => feature.iso3 && feature.geometry);
+
+  return (lat, lng) => {
+    for (const feature of features) {
+      if (pointInGeometry(lng, lat, feature.geometry)) return feature.iso3;
+    }
+    return "";
+  };
+}
+
+function buildCountryNameLookup(countries) {
+  const map = new Map();
+  for (const country of countries) {
+    map.set(normalizeCountryName(country.name), country.iso3);
+  }
+
+  const aliases = {
+    "united states of america": "United States",
+    "democratic republic of the congo": "DR Congo",
+    "republic of congo": "Republic of the Congo",
+    "central african republic": "Central African Republic",
+    "republic of serbia": "Serbia",
+    "czech republic": "Czechia",
+    "swaziland": "Eswatini",
+    "east timor": "Timor-Leste",
+    "ivory coast": "Ivory Coast",
+    "laos": "Laos",
+    "russia": "Russia",
+    "syria": "Syria",
+    "moldova": "Moldova",
+    "south korea": "South Korea",
+    "north korea": "North Korea",
+    "iran": "Iran",
+    "venezuela": "Venezuela",
+    "bolivia": "Bolivia",
+    "tanzania": "Tanzania",
+    "vietnam": "Vietnam",
+    "brunei": "Brunei",
+    "the bahamas": "Bahamas",
+    "gambia": "Gambia",
+    "falkland islands": "Falkland Islands",
+    "french southern and antarctic lands": "French Southern and Antarctic Lands"
+  };
+
+  for (const [featureName, countryName] of Object.entries(aliases)) {
+    const match = countries.find((country) => normalizeCountryName(country.name) === normalizeCountryName(countryName));
+    if (match) map.set(normalizeCountryName(featureName), match.iso3);
+  }
+
+  return map;
+}
+
+function normalizeCountryName(name) {
+  return String(name)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function pointInGeometry(lng, lat, geometry) {
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.type === "MultiPolygon" ? geometry.coordinates : [];
+  return polygons.some((polygon) => pointInPolygon(lng, lat, polygon));
+}
+
+function pointInPolygon(lng, lat, polygon) {
+  if (!polygon.length || !pointInRing(lng, lat, polygon[0])) return false;
+  return !polygon.slice(1).some((hole) => pointInRing(lng, lat, hole));
+}
+
+function pointInRing(lng, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+    const intersects = yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi || Number.EPSILON) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
 }
 
 function nearestMarkerIso(event, hitGroup, camera, renderer, worldPosition, screenPosition) {

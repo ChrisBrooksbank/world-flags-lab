@@ -1,11 +1,11 @@
-const CACHE_NAME = "world-flags-lab-v5";
+const CACHE_NAME = "world-flags-lab-v6";
 const CORE_ASSETS = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icons/icon.svg",
-  "./src/app.js?v=5",
-  "./src/styles.css?v=5",
+  "./src/app.js?v=6",
+  "./src/styles.css?v=6",
   "./vendor/three.module.js",
   "./public/data/countries.json",
   "./public/maps/countries.geojson"
