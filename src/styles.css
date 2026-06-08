@@ -563,6 +563,26 @@ select {
   font-size: 0.88rem;
 }
 
+.globe-selected {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  max-width: min(48%, 260px);
+  color: white;
+  background: rgba(16, 33, 36, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.88rem;
+  text-align: right;
+}
+
+.icon-toggle.active {
+  background: var(--brand-2);
+  border-color: var(--brand-2);
+  color: white;
+}
+
 .globe-card {
   padding: 1rem;
   display: grid;
@@ -921,6 +941,21 @@ select {
   .globe-canvas {
     min-height: 430px;
     height: 58vh;
+  }
+
+  .globe-hint {
+    left: 0.7rem;
+    right: 0.7rem;
+    bottom: 0.7rem;
+    text-align: center;
+  }
+
+  .globe-selected {
+    left: 0.7rem;
+    right: 0.7rem;
+    bottom: 3.65rem;
+    max-width: none;
+    text-align: center;
   }
 
   .atlas-row {

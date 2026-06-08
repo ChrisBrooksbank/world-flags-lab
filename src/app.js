@@ -17,6 +17,7 @@ const state = {
   query: "",
   globeIso: "",
   globeMode: "flags",
+  globeSpin: false,
   progress: loadProgress(),
   quiz: null,
   match: null
@@ -53,6 +54,7 @@ function freshProgress() {
       sound: false,
       reducedMotion: false,
       colorAssist: true,
+      globeSpin: false,
       scope: "core"
     }
   };
@@ -70,6 +72,7 @@ async function boot() {
     state.countries = payload.countries;
     state.countryByIso = new Map(state.countries.map((country) => [country.iso3, country]));
     state.scope = state.progress.settings.scope || "core";
+    state.globeSpin = Boolean(state.progress.settings.globeSpin);
     registerServiceWorker();
     render();
   } catch (error) {
@@ -299,15 +302,19 @@ function renderGlobe() {
               <option value="weak" ${state.globeMode === "weak" ? "selected" : ""}>Weak flags</option>
             </select>
           </label>
+          <button class="icon-toggle ${state.globeSpin ? "active" : ""}" data-globe-spin aria-pressed="${state.globeSpin}">
+            ${state.globeSpin ? "Pause Spin" : "Spin Off"}
+          </button>
           ${renderFilters()}
         </div>
       </div>
       <div class="globe-layout">
         <div class="globe-stage">
-          <div id="globe-canvas" class="globe-canvas" data-countries="${escapeAttr(JSON.stringify(pool.map(globeCountryPayload)))}" data-selected="${selected.iso3}" data-mode="${state.globeMode}">
+          <div id="globe-canvas" class="globe-canvas" data-countries="${escapeAttr(JSON.stringify(pool.map(globeCountryPayload)))}" data-selected="${selected.iso3}" data-mode="${state.globeMode}" data-spin="${state.globeSpin}">
             <div class="globe-loading">Loading globe...</div>
           </div>
-          <div class="globe-hint">Drag to rotate. Tap a marker to inspect its flag.</div>
+          <div class="globe-hint">Drag to rotate. Tap a marker to inspect its flag. Spin is optional.</div>
+          <div class="globe-selected">Selected: <strong>${selected.nameCommon}</strong></div>
         </div>
         <aside class="globe-card">
           <span class="pill">${selected.region}${selected.subregion ? ` / ${selected.subregion}` : ""}</span>
@@ -731,6 +738,7 @@ async function initGlobe() {
   const countries = JSON.parse(host.dataset.countries || "[]");
   const selectedIso = host.dataset.selected;
   const mode = host.dataset.mode;
+  const shouldSpin = host.dataset.spin === "true";
   const [THREE, boundsResponse] = await Promise.all([
     import("../vendor/three.module.js"),
     fetch(COUNTRY_BOUNDS_URL)
@@ -789,7 +797,15 @@ async function initGlobe() {
   host.dataset.outlineObjects = String(globe.getObjectByName("country-outlines")?.children.length || 0);
 
   const markerGroup = new THREE.Group();
+  const hitGroup = new THREE.Group();
   const markerGeometry = new THREE.SphereGeometry(0.036, 12, 12);
+  const hitGeometry = new THREE.SphereGeometry(0.135, 16, 16);
+  const hitMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false
+  });
   for (const country of countries) {
     const position = latLngToVector(country.lat, country.lng, radius + 0.055, THREE);
     const marker = new THREE.Mesh(markerGeometry, new THREE.MeshBasicMaterial({ color: markerColor(country, mode, selectedIso) }));
@@ -797,8 +813,15 @@ async function initGlobe() {
     marker.userData.iso3 = country.iso3;
     marker.scale.setScalar(country.iso3 === selectedIso ? 2.05 : markerScale(country, mode));
     markerGroup.add(marker);
+
+    const hitTarget = new THREE.Mesh(hitGeometry, hitMaterial);
+    hitTarget.position.copy(latLngToVector(country.lat, country.lng, radius + 0.14, THREE));
+    hitTarget.userData.iso3 = country.iso3;
+    hitTarget.userData.name = country.name;
+    hitGroup.add(hitTarget);
   }
   globe.add(markerGroup);
+  globe.add(hitGroup);
 
   scene.add(new THREE.AmbientLight(0xffffff, 1.8));
   const key = new THREE.DirectionalLight(0xffffff, 2.7);
@@ -807,6 +830,8 @@ async function initGlobe() {
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
+  const markerWorldPosition = new THREE.Vector3();
+  const markerScreenPosition = new THREE.Vector3();
   const drag = { active: false, x: 0, y: 0, moved: 0 };
 
   function resize() {
@@ -850,9 +875,10 @@ async function initGlobe() {
     if (drag.moved > 8) return;
     pointerToNdc(event);
     raycaster.setFromCamera(pointer, camera);
-    const hit = raycaster.intersectObjects(markerGroup.children, false)[0];
-    if (hit?.object?.userData?.iso3) {
-      state.globeIso = hit.object.userData.iso3;
+    const hit = raycaster.intersectObjects(hitGroup.children, false)[0];
+    const fallbackIso = hit?.object?.userData?.iso3 || nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition);
+    if (fallbackIso) {
+      state.globeIso = fallbackIso;
       render();
     }
   }
@@ -866,7 +892,7 @@ async function initGlobe() {
   function animate() {
     if (bootId !== globeBootId) return;
     frame = requestAnimationFrame(animate);
-    if (!drag.active && !state.progress.settings.reducedMotion) globe.rotation.y += 0.0018;
+    if (shouldSpin && !drag.active && !state.progress.settings.reducedMotion) globe.rotation.y += 0.0018;
     renderer.render(scene, camera);
   }
 
@@ -881,6 +907,8 @@ async function initGlobe() {
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
       markerGeometry.dispose();
+      hitGeometry.dispose();
+      hitMaterial.dispose();
       scene.traverse((object) => {
         object.geometry?.dispose?.();
         if (object.material) {
@@ -1012,6 +1040,34 @@ function markerScale(country, mode) {
   if (mode === "weak" && (country.weak > 0 || country.mastery < 25)) return 1.55;
   if (mode === "mastery" && country.mastery >= 80) return 1.45;
   return 1;
+}
+
+function nearestMarkerIso(event, hitGroup, camera, renderer, worldPosition, screenPosition) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  let bestIso = "";
+  let bestDistance = Number.POSITIVE_INFINITY;
+  const maxDistance = Math.max(30, Math.min(rect.width, rect.height) * 0.065);
+
+  for (const marker of hitGroup.children) {
+    marker.getWorldPosition(worldPosition);
+    const cameraSpace = worldPosition.clone().applyMatrix4(camera.matrixWorldInverse);
+    if (cameraSpace.z > -0.35) continue;
+
+    screenPosition.copy(worldPosition).project(camera);
+    if (screenPosition.z < -1 || screenPosition.z > 1) continue;
+
+    const x = rect.left + ((screenPosition.x + 1) / 2) * rect.width;
+    const y = rect.top + ((1 - screenPosition.y) / 2) * rect.height;
+    const dx = event.clientX - x;
+    const dy = event.clientY - y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    if (distance < bestDistance && distance <= maxDistance) {
+      bestDistance = distance;
+      bestIso = marker.userData.iso3;
+    }
+  }
+
+  return bestIso;
 }
 
 function mapPosition(country) {
@@ -1430,6 +1486,13 @@ function wireDynamicPieces() {
 
   document.querySelector("[data-globe-mode]")?.addEventListener("change", (event) => {
     state.globeMode = event.target.value;
+    render();
+  });
+
+  document.querySelector("[data-globe-spin]")?.addEventListener("click", () => {
+    state.globeSpin = !state.globeSpin;
+    state.progress.settings.globeSpin = state.globeSpin;
+    saveProgress();
     render();
   });
 
