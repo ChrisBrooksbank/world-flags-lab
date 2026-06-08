@@ -875,7 +875,7 @@ async function initGlobe() {
     if (drag.moved > 8) return;
     pointerToNdc(event);
     raycaster.setFromCamera(pointer, camera);
-    const hit = raycaster.intersectObjects(hitGroup.children, false)[0];
+    const hit = firstVisibleMarkerHit(raycaster.intersectObjects(hitGroup.children, false), markerWorldPosition);
     const fallbackIso = hit?.object?.userData?.iso3 || nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition);
     if (fallbackIso) {
       state.globeIso = fallbackIso;
@@ -1042,6 +1042,14 @@ function markerScale(country, mode) {
   return 1;
 }
 
+function firstVisibleMarkerHit(intersections, worldPosition) {
+  for (const hit of intersections) {
+    hit.object.getWorldPosition(worldPosition);
+    if (worldPosition.z > 0.18) return hit;
+  }
+  return null;
+}
+
 function nearestMarkerIso(event, hitGroup, camera, renderer, worldPosition, screenPosition) {
   const rect = renderer.domElement.getBoundingClientRect();
   let bestIso = "";
@@ -1050,6 +1058,7 @@ function nearestMarkerIso(event, hitGroup, camera, renderer, worldPosition, scre
 
   for (const marker of hitGroup.children) {
     marker.getWorldPosition(worldPosition);
+    if (worldPosition.z <= 0.18) continue;
     const cameraSpace = worldPosition.clone().applyMatrix4(camera.matrixWorldInverse);
     if (cameraSpace.z > -0.35) continue;
 
