@@ -1,11 +1,11 @@
-const CACHE_NAME = "world-flags-lab-v19";
+const CACHE_NAME = "world-flags-lab-v20";
 const CORE_ASSETS = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icons/icon.svg",
-  "./src/app.js?v=19",
-  "./src/styles.css?v=19",
+  "./src/app.js?v=20",
+  "./src/styles.css?v=20",
   "./vendor/three.module.js",
   "./public/data/countries.json",
   "./public/maps/countries.geojson"
@@ -35,8 +35,32 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const url = new URL(event.request.url);
+  const isAppShell =
+    event.request.mode === "navigate" ||
+    url.pathname.endsWith("/") ||
+    url.pathname.endsWith("/index.html") ||
+    url.pathname.endsWith("/src/app.js") ||
+    url.pathname.endsWith("/src/styles.css");
+
+  if (isAppShell) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          return response;
+        })
+        .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./index.html")))
+    );
+    return;
+  }
 
   event.respondWith(
     caches.match(event.request).then((cached) => {

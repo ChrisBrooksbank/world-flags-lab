@@ -88,8 +88,59 @@ async function boot() {
 
 function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(() => {});
+    let updateReloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (updateReloading) return;
+      showUpdatePrompt({ reloadOnly: true });
+    });
+    navigator.serviceWorker
+      .register("./sw.js")
+      .then((registration) => {
+        if (registration.waiting) showUpdatePrompt({ worker: registration.waiting });
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          if (!worker) return;
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) {
+              showUpdatePrompt({ worker });
+            }
+          });
+        });
+        const checkForUpdates = () => registration.update().catch(() => {});
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") checkForUpdates();
+        });
+        window.setInterval(checkForUpdates, 60 * 60 * 1000);
+      })
+      .catch(() => {});
+
+    window.applyAppUpdate = (worker) => {
+      updateReloading = true;
+      if (worker) worker.postMessage({ type: "SKIP_WAITING" });
+      window.setTimeout(() => window.location.reload(), 350);
+    };
   }
+}
+
+function showUpdatePrompt({ worker = null, reloadOnly = false } = {}) {
+  if (document.querySelector("[data-update-prompt]")) return;
+  const prompt = document.createElement("div");
+  prompt.className = "update-prompt";
+  prompt.dataset.updatePrompt = "true";
+  prompt.innerHTML = `
+    <div>
+      <strong>Update ready</strong>
+      <span>A newer version of World Flags Lab is available.</span>
+    </div>
+    <button class="primary" data-update-now>Update now</button>
+    <button class="ghost" data-update-later aria-label="Dismiss update prompt">Later</button>
+  `;
+  prompt.querySelector("[data-update-now]")?.addEventListener("click", () => {
+    window.applyAppUpdate?.(reloadOnly ? null : worker);
+    if (reloadOnly) window.location.reload();
+  });
+  prompt.querySelector("[data-update-later]")?.addEventListener("click", () => prompt.remove());
+  document.body.appendChild(prompt);
 }
 
 function eligibleCountries() {

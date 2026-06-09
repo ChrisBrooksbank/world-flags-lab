@@ -114,6 +114,8 @@ The data generator uses REST Countries and downloads SVG flag assets into the re
 
 World Flags Lab stores progress in the browser. There is no login, no remote analytics, and no server-side progress storage. Users can export and import their progress JSON from the Progress screen.
 
+Installed PWA updates are detected in-app. When a new service worker is available, the app shows an update prompt; app-shell requests prefer fresh network responses while still falling back to cached files offline.
+
 ## Roadmap Ideas
 
 - Better flag symbolism/history per country.
