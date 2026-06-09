@@ -32,11 +32,16 @@ GitHub repo: [https://github.com/ChrisBrooksbank/world-flags-lab](https://github
 The globe is designed to make country location memorable:
 
 - Country boundary outlines are rendered on a 3D sphere.
+- Oceans use a subtle sea texture with depth variation and light wave detail.
+- Major oceans are labelled directly on the rotating globe.
 - The globe starts still, with optional spin.
 - Drag to rotate.
-- Tap/click a marker to inspect a country.
+- Pinch on touchscreens or scroll on desktop to zoom into small countries.
+- Flag mode textures countries with their flags.
+- Hover or tap/click a flag surface or marker to inspect a country in the fixed globe panel.
+- Map locator rounds use a labelled mini world map with continent and ocean guides.
 - Tap/click land to identify that country and pop out its flag/name.
-- Marker modes show flags, mastery, or weak countries.
+- Globe modes show flag textures, mastery, or weak countries.
 
 ## Local Development
 
@@ -116,4 +121,3 @@ World Flags Lab stores progress in the browser. There is no login, no remote ana
 - Audio pronunciation for countries and capitals.
 - Classroom mode with shareable local progress exports.
 - Optional multilingual UI.
-

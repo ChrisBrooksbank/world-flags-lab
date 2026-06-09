@@ -18,7 +18,6 @@ const state = {
   globeIso: "",
   globeMode: "flags",
   globeSpin: false,
-  globeCallout: null,
   progress: loadProgress(),
   quiz: null,
   match: null
@@ -284,7 +283,6 @@ function renderTest() {
 function renderGlobe() {
   const pool = state.filtered.length ? state.filtered : eligibleCountries();
   const selected = state.countryByIso.get(state.globeIso) || dailyCountry(pool);
-  const calloutCountry = state.globeCallout ? state.countryByIso.get(state.globeCallout.iso3) : null;
   const sameRegion = pool
     .filter((country) => country.region === selected.region && country.iso3 !== selected.iso3)
     .slice(0, 8);
@@ -293,7 +291,7 @@ function renderGlobe() {
       <div class="globe-toolbar">
         <div>
           <p class="eyebrow">Globe Explorer</p>
-          <h1>Spin the world, then tap a country marker.</h1>
+          <h1>Zoom the world, then tap a country flag.</h1>
         </div>
         <div class="globe-controls">
           <label>
@@ -315,16 +313,15 @@ function renderGlobe() {
           <div id="globe-canvas" class="globe-canvas" data-countries="${escapeAttr(JSON.stringify(pool.map(globeCountryPayload)))}" data-selected="${selected.iso3}" data-mode="${state.globeMode}" data-spin="${state.globeSpin}">
             <div class="globe-loading">Loading globe...</div>
           </div>
-          <div class="globe-hint">Drag to rotate. Tap a marker to inspect its flag. Spin is optional.</div>
-          <div class="globe-selected">Selected: <strong>${selected.nameCommon}</strong></div>
-          ${
-            calloutCountry
-              ? `<div class="globe-pop" style="left:${state.globeCallout.x}%;top:${state.globeCallout.y}%" data-pop-key="${state.globeCallout.key}">
-                  ${flagImg(calloutCountry, "globe-pop-flag")}
-                  <strong>${calloutCountry.nameCommon}</strong>
-                </div>`
-              : ""
-          }
+          <div class="globe-hint">Drag to rotate. Pinch or scroll to zoom. Hover or tap a country.</div>
+          <div class="globe-inspector" id="globe-inspector" aria-live="polite" data-selected-iso="${selected.iso3}">
+            ${flagImg(selected, "globe-inspector-flag")}
+            <div>
+              <span data-globe-inspector-status>Selected</span>
+              <strong data-globe-inspector-name>${selected.nameCommon}</strong>
+              <small data-globe-inspector-region>${selected.region}${selected.subregion ? ` / ${selected.subregion}` : ""}</small>
+            </div>
+          </div>
         </div>
         <aside class="globe-card">
           <span class="pill">${selected.region}${selected.subregion ? ` / ${selected.subregion}` : ""}</span>
@@ -537,9 +534,9 @@ function renderMapQuestion(question, time) {
     <section class="quiz-shell">
       ${quizHeader(time)}
       <div class="question-card">
-        <div class="prompt">${flagImg(question.country, "quiz-flag")}<h2>Tap ${question.country.nameCommon}'s location</h2></div>
+        <div class="prompt">${flagImg(question.country, "quiz-flag")}<h2>Tap ${question.country.nameCommon} on the mini world map</h2></div>
         ${interactiveMap(question)}
-        ${question.answered ? answerFeedback(question) : `<p class="muted">A close tap counts; tiny countries use a generous target.</p>`}
+        ${question.answered ? answerFeedback(question) : `<p class="muted">Use the continent and ocean labels as guides. A close tap counts; tiny countries use a generous target.</p>`}
       </div>
     </section>
   `;
@@ -721,9 +718,20 @@ function interactiveMap(question) {
   const click = question.click ? `left:${question.click.x}%;top:${question.click.y}%` : "";
   return `
     <button class="world-map ${question.answered ? "answered" : ""}" data-map-answer aria-label="World map locator">
-      <span class="continent c1"></span><span class="continent c2"></span><span class="continent c3"></span><span class="continent c4"></span><span class="continent c5"></span><span class="continent c6"></span>
-      ${question.answered ? `<span class="target-dot" style="left:${pos.x}%;top:${pos.y}%"></span>` : ""}
-      ${question.click ? `<span class="click-dot" style="${click}"></span>` : ""}
+      <span class="equator"></span>
+      <span class="prime"></span>
+      <span class="map-ocean pacific-west">Pacific Ocean</span>
+      <span class="map-ocean atlantic">Atlantic Ocean</span>
+      <span class="map-ocean indian">Indian Ocean</span>
+      <span class="map-region-label north-america">North America</span>
+      <span class="map-region-label south-america">South America</span>
+      <span class="map-region-label europe">Europe</span>
+      <span class="map-region-label africa">Africa</span>
+      <span class="map-region-label asia">Asia</span>
+      <span class="map-region-label oceania">Oceania</span>
+      <span class="continent c1"></span><span class="continent c2"></span><span class="continent c3"></span><span class="continent c4"></span><span class="continent c5"></span><span class="continent c6"></span><span class="continent c7"></span><span class="continent c8"></span>
+      ${question.answered ? `<span class="target-dot" style="left:${pos.x}%;top:${pos.y}%"></span><span class="target-label" style="left:${Math.min(82, pos.x + 3)}%;top:${Math.max(7, pos.y - 7)}%">Correct: ${question.country.nameCommon}</span>` : ""}
+      ${question.click ? `<span class="click-dot" style="${click}"></span><span class="click-label" style="left:${Math.min(82, question.click.x + 3)}%;top:${Math.min(88, question.click.y + 3)}%">Your tap</span>` : ""}
     </button>
   `;
 }
@@ -732,9 +740,12 @@ function globeCountryPayload(country) {
   return {
     iso3: country.iso3,
     name: country.nameCommon,
+    flagSvgPath: country.flagSvgPath,
+    flagAlt: country.flagAlt,
     lat: Number(country.mapLat),
     lng: Number(country.mapLng),
     region: country.region,
+    subregion: country.subregion,
     mastery: masteryFor(country.iso3),
     weak: progressFor(country.iso3).wrong
   };
@@ -781,12 +792,14 @@ async function initGlobe() {
   scene.add(globe);
 
   const radius = 2.35;
+  const oceanTexture = makeOceanTexture(THREE);
   const sphere = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 96, 64),
     new THREE.MeshStandardMaterial({
-      color: 0x17677d,
-      roughness: 0.82,
-      metalness: 0.02
+      color: 0x5ab4c6,
+      map: oceanTexture,
+      roughness: 0.48,
+      metalness: 0.08
     })
   );
   globe.add(sphere);
@@ -798,17 +811,25 @@ async function initGlobe() {
   globe.add(atmosphere);
 
   addGlobeGuides(THREE, globe, radius);
+  addOceanLabels(THREE, globe, radius);
   if (countryBounds) {
     try {
       addCountryOutlines(THREE, globe, radius, countryBounds);
-      addSelectedFlagFill(THREE, globe, radius, countryBounds, countries, selectedIso);
+      if (mode === "flags") {
+        addCountryFlagFills(THREE, globe, radius, countryBounds, countries, selectedIso);
+      } else {
+        addSelectedFlagFill(THREE, globe, radius, countryBounds, countries, selectedIso);
+      }
     } catch (error) {
       host.dataset.outlineError = error.message;
     }
   }
   host.dataset.outlineObjects = String(globe.getObjectByName("country-outlines")?.children.length || 0);
-  host.dataset.flagFillObjects = String(globe.getObjectByName("selected-flag-fill")?.children.length || 0);
+  host.dataset.flagFillObjects = String(
+    globe.getObjectByName("country-flag-fills")?.children.length || globe.getObjectByName("selected-flag-fill")?.children.length || 0
+  );
   host.dataset.flagHaloObjects = String(globe.getObjectByName("selected-flag-halo")?.children.length || 0);
+  host.dataset.oceanLabelObjects = String(globe.getObjectByName("ocean-labels")?.children.length || 0);
 
   const markerGroup = new THREE.Group();
   const hitGroup = new THREE.Group();
@@ -848,6 +869,11 @@ async function initGlobe() {
   const markerScreenPosition = new THREE.Vector3();
   const sphereLocalPoint = new THREE.Vector3();
   const drag = { active: false, x: 0, y: 0, moved: 0 };
+  const pointers = new Map();
+  const zoom = { distance: 7.2, min: 4.45, max: 9.4, pinchStartDistance: 0, cameraStartDistance: 7.2 };
+  const countryByIso = new Map(countries.map((country) => [country.iso3, country]));
+  const inspector = document.querySelector("#globe-inspector");
+  let inspectorIso = selectedIso;
 
   function resize() {
     const rect = host.getBoundingClientRect();
@@ -864,16 +890,81 @@ async function initGlobe() {
     pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
   }
 
+  function updateInspector(iso3, status = "Selected") {
+    if (!inspector || !iso3 || (inspectorIso === `${status}:${iso3}`)) return;
+    const country = countryByIso.get(iso3);
+    if (!country) return;
+    inspectorIso = `${status}:${iso3}`;
+    const img = inspector.querySelector(".globe-inspector-flag");
+    const statusNode = inspector.querySelector("[data-globe-inspector-status]");
+    const nameNode = inspector.querySelector("[data-globe-inspector-name]");
+    const regionNode = inspector.querySelector("[data-globe-inspector-region]");
+    if (img) {
+      img.src = country.flagSvgPath;
+      img.alt = country.flagAlt || `Flag of ${country.name}`;
+    }
+    if (statusNode) statusNode.textContent = status;
+    if (nameNode) nameNode.textContent = country.name;
+    if (regionNode) regionNode.textContent = [country.region, country.subregion].filter(Boolean).join(" / ");
+  }
+
+  function countryIsoAtPointer(event, includeNearestMarker) {
+    pointerToNdc(event);
+    raycaster.setFromCamera(pointer, camera);
+    const hit = firstVisibleMarkerHit(raycaster.intersectObjects(hitGroup.children, false), markerWorldPosition);
+    const sphereHit = hit ? null : raycaster.intersectObject(sphere, false)[0];
+    const surfaceIso = sphereHit && surfacePicker ? countryIsoFromSphereHit(sphereHit, globe, surfacePicker, sphereLocalPoint) : "";
+    return (
+      hit?.object?.userData?.iso3 ||
+      surfaceIso ||
+      (includeNearestMarker ? nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition) : "")
+    );
+  }
+
+  function setCameraDistance(distance) {
+    zoom.distance = clamp(distance, zoom.min, zoom.max);
+    camera.position.z = zoom.distance;
+    host.dataset.zoom = zoom.distance.toFixed(2);
+  }
+
+  setCameraDistance(zoom.distance);
+
+  function pointerDistance() {
+    const values = [...pointers.values()];
+    if (values.length < 2) return 0;
+    return Math.hypot(values[0].x - values[1].x, values[0].y - values[1].y);
+  }
+
   function onPointerDown(event) {
-    drag.active = true;
-    drag.x = event.clientX;
-    drag.y = event.clientY;
-    drag.moved = 0;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size === 1) {
+      drag.active = true;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      drag.moved = 0;
+    } else if (pointers.size === 2) {
+      drag.active = false;
+      drag.moved = 0;
+      zoom.pinchStartDistance = pointerDistance();
+      zoom.cameraStartDistance = zoom.distance;
+    }
     renderer.domElement.setPointerCapture?.(event.pointerId);
   }
 
   function onPointerMove(event) {
-    if (!drag.active) return;
+    if (pointers.has(event.pointerId)) pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointers.size >= 2) {
+      const distance = pointerDistance();
+      if (distance > 0 && zoom.pinchStartDistance > 0) {
+        setCameraDistance(zoom.cameraStartDistance * (zoom.pinchStartDistance / distance));
+      }
+      return;
+    }
+    if (!drag.active) {
+      const hoverIso = event.pointerType === "mouse" ? countryIsoAtPointer(event, false) : "";
+      updateInspector(hoverIso || selectedIso, hoverIso ? "Hovering" : "Selected");
+      return;
+    }
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     drag.x = event.clientX;
@@ -884,27 +975,56 @@ async function initGlobe() {
   }
 
   function onPointerUp(event) {
-    if (!drag.active) return;
+    const wasDragActive = drag.active;
     drag.active = false;
+    pointers.delete(event.pointerId);
     renderer.domElement.releasePointerCapture?.(event.pointerId);
-    if (drag.moved > 8) return;
-    pointerToNdc(event);
-    raycaster.setFromCamera(pointer, camera);
-    const hit = firstVisibleMarkerHit(raycaster.intersectObjects(hitGroup.children, false), markerWorldPosition);
-    const sphereHit = hit ? null : raycaster.intersectObject(sphere, false)[0];
-    const surfaceIso = sphereHit && surfacePicker ? countryIsoFromSphereHit(sphereHit, globe, surfacePicker, sphereLocalPoint) : "";
-    const fallbackIso =
-      hit?.object?.userData?.iso3 ||
-      surfaceIso ||
-      nearestMarkerIso(event, hitGroup, camera, renderer, markerWorldPosition, markerScreenPosition);
-    if (fallbackIso) {
-      selectGlobeCountry(fallbackIso, event, renderer);
+    if (pointers.size === 1) {
+      const remaining = [...pointers.values()][0];
+      drag.active = true;
+      drag.x = remaining.x;
+      drag.y = remaining.y;
+      drag.moved = 9;
+      return;
     }
+    if (!wasDragActive) {
+      updateInspector(selectedIso, "Selected");
+      return;
+    }
+    if (drag.moved > 8) {
+      updateInspector(selectedIso, "Selected");
+      return;
+    }
+    const fallbackIso = countryIsoAtPointer(event, true);
+    if (fallbackIso) {
+      selectGlobeCountry(fallbackIso);
+    }
+  }
+
+  function onPointerLeave() {
+    drag.active = false;
+    pointers.clear();
+    updateInspector(selectedIso, "Selected");
+  }
+
+  function onPointerCancel(event) {
+    pointers.delete(event.pointerId);
+    drag.active = false;
+    updateInspector(selectedIso, "Selected");
+  }
+
+  function onWheel(event) {
+    event.preventDefault();
+    const zoomFactor = Math.exp(event.deltaY * 0.0012);
+    setCameraDistance(zoom.distance * zoomFactor);
   }
 
   renderer.domElement.addEventListener("pointerdown", onPointerDown);
   renderer.domElement.addEventListener("pointermove", onPointerMove);
   renderer.domElement.addEventListener("pointerup", onPointerUp);
+  renderer.domElement.addEventListener("pointerleave", onPointerLeave);
+  renderer.domElement.addEventListener("pointercancel", onPointerCancel);
+  renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
   window.addEventListener("resize", resize);
 
   let frame = 0;
@@ -925,6 +1045,9 @@ async function initGlobe() {
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
+      renderer.domElement.removeEventListener("pointercancel", onPointerCancel);
+      renderer.domElement.removeEventListener("wheel", onWheel);
       markerGeometry.dispose();
       hitGeometry.dispose();
       hitMaterial.dispose();
@@ -932,7 +1055,10 @@ async function initGlobe() {
         object.geometry?.dispose?.();
         if (object.material) {
           const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material) => material.dispose?.());
+          materials.forEach((material) => {
+            material.map?.dispose?.();
+            material.dispose?.();
+          });
         }
       });
       renderer.dispose();
@@ -960,6 +1086,120 @@ function addGlobeGuides(THREE, globe, radius) {
     for (let lat = -84; lat <= 84; lat += 4) points.push(latLngToVector(lat, lng, radius + 0.09, THREE));
     globe.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
   }
+}
+
+function addOceanLabels(THREE, globe, radius) {
+  const labels = [
+    { name: "Pacific Ocean", lat: 10, lng: -150, scale: 0.62 },
+    { name: "Pacific Ocean", lat: -8, lng: 165, scale: 0.58 },
+    { name: "Atlantic Ocean", lat: 22, lng: -42, scale: 0.56 },
+    { name: "Atlantic Ocean", lat: -28, lng: -18, scale: 0.5 },
+    { name: "Indian Ocean", lat: -22, lng: 78, scale: 0.54 },
+    { name: "Indian Ocean", lat: -35, lng: 105, scale: 0.46 },
+    { name: "Southern Ocean", lat: -56, lng: 40, scale: 0.5 },
+    { name: "Arctic Ocean", lat: 72, lng: -20, scale: 0.48 }
+  ];
+  const labelGroup = new THREE.Group();
+  labelGroup.name = "ocean-labels";
+
+  for (const label of labels) {
+    const texture = makeTextTexture(THREE, label.name);
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0.82,
+      depthTest: true,
+      depthWrite: false
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.position.copy(latLngToVector(label.lat, label.lng, radius + 0.31, THREE));
+    sprite.scale.set(label.scale * 2.7, label.scale * 0.58, 1);
+    sprite.renderOrder = 3;
+    sprite.userData.label = label.name;
+    labelGroup.add(sprite);
+  }
+
+  globe.add(labelGroup);
+}
+
+function makeOceanTexture(THREE) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 512;
+  const context = canvas.getContext("2d");
+  const random = seededRandom(42);
+  const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+  gradient.addColorStop(0, "#1a758b");
+  gradient.addColorStop(0.42, "#2f9bb0");
+  gradient.addColorStop(0.7, "#145f78");
+  gradient.addColorStop(1, "#0d4058");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let i = 0; i < 1500; i += 1) {
+    const x = random() * canvas.width;
+    const y = random() * canvas.height;
+    const alpha = 0.025 + random() * 0.045;
+    context.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    context.fillRect(x, y, 1 + random() * 2, 1);
+  }
+
+  for (let i = 0; i < 34; i += 1) {
+    const y = 24 + random() * (canvas.height - 48);
+    const amplitude = 6 + random() * 18;
+    const length = 90 + random() * 180;
+    const start = random() * canvas.width;
+    context.beginPath();
+    context.lineWidth = 1 + random() * 1.8;
+    context.strokeStyle = `rgba(202, 246, 255, ${0.08 + random() * 0.1})`;
+    for (let step = 0; step <= length; step += 8) {
+      const x = (start + step) % canvas.width;
+      const waveY = y + Math.sin(step * 0.045 + i) * amplitude;
+      if (step === 0) context.moveTo(x, waveY);
+      else context.lineTo(x, waveY);
+    }
+    context.stroke();
+  }
+
+  const glow = context.createRadialGradient(canvas.width * 0.34, canvas.height * 0.28, 20, canvas.width * 0.34, canvas.height * 0.28, 270);
+  glow.addColorStop(0, "rgba(200, 255, 250, 0.2)");
+  glow.addColorStop(1, "rgba(200, 255, 250, 0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+function seededRandom(seed) {
+  let value = seed;
+  return () => {
+    value = (value * 1664525 + 1013904223) % 4294967296;
+    return value / 4294967296;
+  };
+}
+
+function makeTextTexture(THREE, text) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 128;
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.font = "800 42px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.lineWidth = 8;
+  context.strokeStyle = "rgba(10, 31, 35, 0.72)";
+  context.fillStyle = "rgba(246, 255, 252, 0.94)";
+  context.strokeText(text, canvas.width / 2, canvas.height / 2);
+  context.fillText(text, canvas.width / 2, canvas.height / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
 }
 
 function addCountryOutlines(THREE, globe, radius, geojson) {
@@ -1033,6 +1273,44 @@ function addSelectedFlagFill(THREE, globe, radius, geojson, countries, selectedI
   addSelectedFlagHalo(THREE, globe, radius, feature.geometry);
 }
 
+function addCountryFlagFills(THREE, globe, radius, geojson, countries, selectedIso) {
+  const featureByIso = buildCountryFeatureLookup(geojson, countries);
+  const textureLoader = new THREE.TextureLoader();
+  const fillGroup = new THREE.Group();
+  fillGroup.name = "country-flag-fills";
+
+  for (const country of countries) {
+    const feature = featureByIso.get(country.iso3);
+    if (!feature?.geometry || !country.flagSvgPath) continue;
+
+    const texture = textureLoader.load(country.flagSvgPath);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: country.iso3 === selectedIso ? 1 : 0.86,
+      side: THREE.DoubleSide,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2
+    });
+    const polygons = feature.geometry.type === "Polygon" ? [feature.geometry.coordinates] : feature.geometry.type === "MultiPolygon" ? feature.geometry.coordinates : [];
+
+    for (const polygon of polygons) {
+      const geometry = buildFlagPolygonGeometry(THREE, polygon, radius + (country.iso3 === selectedIso ? 0.205 : 0.18));
+      if (!geometry) continue;
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.iso3 = country.iso3;
+      fillGroup.add(mesh);
+    }
+  }
+
+  if (fillGroup.children.length) globe.add(fillGroup);
+  const selectedFeature = featureByIso.get(selectedIso);
+  if (selectedFeature?.geometry) addSelectedFlagHalo(THREE, globe, radius, selectedFeature.geometry);
+}
+
 function addSelectedFlagHalo(THREE, globe, radius, geometry) {
   const haloMaterial = new THREE.LineBasicMaterial({
     color: 0xffd34d,
@@ -1057,11 +1335,17 @@ function addSelectedFlagHalo(THREE, globe, radius, geometry) {
 }
 
 function findGeoFeatureForCountry(geojson, countries, iso3) {
+  return buildCountryFeatureLookup(geojson, countries).get(iso3);
+}
+
+function buildCountryFeatureLookup(geojson, countries) {
   const isoByName = buildCountryNameLookup(countries);
-  return (geojson.features || []).find((feature) => {
+  const map = new Map();
+  for (const feature of geojson.features || []) {
     const featureIso = isoByName.get(normalizeCountryName(feature.properties?.name || ""));
-    return featureIso === iso3;
-  });
+    if (featureIso && !map.has(featureIso)) map.set(featureIso, feature);
+  }
+  return map;
 }
 
 function buildFlagPolygonGeometry(THREE, polygon, radius) {
@@ -1223,12 +1507,8 @@ function firstVisibleMarkerHit(intersections, worldPosition) {
   return null;
 }
 
-function selectGlobeCountry(iso3, event, renderer) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  const x = clamp(((event.clientX - rect.left) / rect.width) * 100, 4, 96);
-  const y = clamp(((event.clientY - rect.top) / rect.height) * 100, 5, 95);
+function selectGlobeCountry(iso3) {
   state.globeIso = iso3;
-  state.globeCallout = { iso3, x, y, key: Date.now() };
   render();
 }
 
