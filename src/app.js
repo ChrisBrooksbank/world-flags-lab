@@ -801,11 +801,14 @@ async function initGlobe() {
   if (countryBounds) {
     try {
       addCountryOutlines(THREE, globe, radius, countryBounds);
+      addSelectedFlagFill(THREE, globe, radius, countryBounds, countries, selectedIso);
     } catch (error) {
       host.dataset.outlineError = error.message;
     }
   }
   host.dataset.outlineObjects = String(globe.getObjectByName("country-outlines")?.children.length || 0);
+  host.dataset.flagFillObjects = String(globe.getObjectByName("selected-flag-fill")?.children.length || 0);
+  host.dataset.flagHaloObjects = String(globe.getObjectByName("selected-flag-halo")?.children.length || 0);
 
   const markerGroup = new THREE.Group();
   const hitGroup = new THREE.Group();
@@ -996,6 +999,140 @@ function addCountryOutlines(THREE, globe, radius, geojson) {
   globe.add(outlineGroup);
 }
 
+function addSelectedFlagFill(THREE, globe, radius, geojson, countries, selectedIso) {
+  const country = countries.find((item) => item.iso3 === selectedIso);
+  if (!country) return;
+
+  const feature = findGeoFeatureForCountry(geojson, countries, selectedIso);
+  if (!feature?.geometry) return;
+
+  const texture = new THREE.TextureLoader().load(country.flagSvgPath);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    opacity: 1,
+    side: THREE.DoubleSide,
+    depthTest: true,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2
+  });
+
+  const fillGroup = new THREE.Group();
+  fillGroup.name = "selected-flag-fill";
+  const polygons = feature.geometry.type === "Polygon" ? [feature.geometry.coordinates] : feature.geometry.type === "MultiPolygon" ? feature.geometry.coordinates : [];
+
+  for (const polygon of polygons) {
+    const geometry = buildFlagPolygonGeometry(THREE, polygon, radius + 0.19);
+    if (!geometry) continue;
+    fillGroup.add(new THREE.Mesh(geometry, material));
+  }
+
+  globe.add(fillGroup);
+  addSelectedFlagHalo(THREE, globe, radius, feature.geometry);
+}
+
+function addSelectedFlagHalo(THREE, globe, radius, geometry) {
+  const haloMaterial = new THREE.LineBasicMaterial({
+    color: 0xffd34d,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: true
+  });
+  const haloGroup = new THREE.Group();
+  haloGroup.name = "selected-flag-halo";
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.type === "MultiPolygon" ? geometry.coordinates : [];
+
+  for (const polygon of polygons) {
+    const outer = polygon[0];
+    if (!Array.isArray(outer) || outer.length < 2) continue;
+    for (const segment of splitRingAtDateline(outer)) {
+      const points = densifyRing(segment, 2).map(([lng, lat]) => latLngToVector(lat, lng, radius + 0.215, THREE));
+      haloGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), haloMaterial));
+    }
+  }
+
+  globe.add(haloGroup);
+}
+
+function findGeoFeatureForCountry(geojson, countries, iso3) {
+  const isoByName = buildCountryNameLookup(countries);
+  return (geojson.features || []).find((feature) => {
+    const featureIso = isoByName.get(normalizeCountryName(feature.properties?.name || ""));
+    return featureIso === iso3;
+  });
+}
+
+function buildFlagPolygonGeometry(THREE, polygon, radius) {
+  const rings = polygon
+    .filter((ring) => Array.isArray(ring) && ring.length >= 3)
+    .map((ring) => simplifyRingForFill(ring));
+  if (!rings.length || rings[0].length < 3) return null;
+
+  const outer = rings[0];
+  const holes = rings.slice(1).filter((ring) => ring.length >= 3);
+  const bounds = coordinateBounds([outer, ...holes]);
+  const contour = outer.map(([lng, lat]) => new THREE.Vector2(lng, lat));
+  const holeVectors = holes.map((ring) => ring.map(([lng, lat]) => new THREE.Vector2(lng, lat)));
+  const triangles = THREE.ShapeUtils.triangulateShape(contour, holeVectors);
+  const vertices2d = [...contour, ...holeVectors.flat()];
+  const positions = [];
+  const uvs = [];
+
+  for (const triangle of triangles) {
+    for (const index of triangle) {
+      const point = vertices2d[index];
+      const projected = latLngToPlainVector(point.y, point.x, radius);
+      positions.push(projected.x, projected.y, projected.z);
+      uvs.push((point.x - bounds.minLng) / bounds.width, (point.y - bounds.minLat) / bounds.height);
+    }
+  }
+
+  if (!positions.length) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
+function simplifyRingForFill(ring) {
+  const simplified = [];
+  let previous = null;
+  for (const point of ring) {
+    const current = [Number(point[0]), Number(point[1])];
+    if (!Number.isFinite(current[0]) || !Number.isFinite(current[1])) continue;
+    if (previous && Math.abs(current[0] - previous[0]) > 180) break;
+    if (!previous || Math.abs(current[0] - previous[0]) > 0.08 || Math.abs(current[1] - previous[1]) > 0.08) {
+      simplified.push(current);
+      previous = current;
+    }
+  }
+  if (simplified.length > 2) {
+    const first = simplified[0];
+    const last = simplified[simplified.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) simplified.push([...first]);
+  }
+  return simplified;
+}
+
+function coordinateBounds(rings) {
+  const coords = rings.flat();
+  const lngs = coords.map((coord) => coord[0]);
+  const lats = coords.map((coord) => coord[1]);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  return {
+    minLng,
+    minLat,
+    width: Math.max(0.001, maxLng - minLng),
+    height: Math.max(0.001, maxLat - minLat)
+  };
+}
+
 function splitRingAtDateline(ring) {
   const segments = [];
   let current = [];
@@ -1039,6 +1176,16 @@ function latLngToVector(lat, lng, radius, THREE) {
     radius * Math.cos(phi),
     radius * Math.sin(phi) * Math.sin(theta)
   );
+}
+
+function latLngToPlainVector(lat, lng, radius) {
+  const phi = (90 - lat) * (Math.PI / 180);
+  const theta = (lng + 180) * (Math.PI / 180);
+  return {
+    x: -radius * Math.sin(phi) * Math.cos(theta),
+    y: radius * Math.cos(phi),
+    z: radius * Math.sin(phi) * Math.sin(theta)
+  };
 }
 
 function vectorToLatLng(vector) {
