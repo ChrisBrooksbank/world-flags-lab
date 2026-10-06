@@ -580,10 +580,12 @@ function renderQuiz() {
     .map((choice, index) => {
       const isCorrect = answered && choice.iso3 === country.iso3;
       const isWrong = answered && choice.iso3 === question.selectedIso && choice.iso3 !== country.iso3;
+      const cue = state.progress.settings.colorAssist && (isCorrect || isWrong) ? `<span class="cue">${isCorrect ? "✓ Correct" : "✗ Your pick"}</span>` : "";
       return `
         <button class="choice ${isCorrect ? "correct" : ""} ${isWrong ? "wrong" : ""}" data-answer="${choice.iso3}" ${answered ? "disabled" : ""}>
           ${quiz.mode === "reverse" ? quizFlagImg(choice, "choice-flag", answered, `Flag option ${index + 1}`) : ""}
           ${quiz.mode !== "reverse" || answered ? `<span>${choice.nameCommon}</span>` : ""}
+          ${cue}
         </button>
       `;
     })
@@ -595,7 +597,7 @@ function renderQuiz() {
       <div class="question-card">
         <div class="prompt">${prompt}</div>
         <div class="choices">${choices}</div>
-        ${answered ? answerFeedback(question) : `<button class="ghost" data-hint>Hint</button>`}
+        ${answered ? answerFeedback(question) : renderHint(question)}
       </div>
     </section>
   `;
@@ -1739,11 +1741,27 @@ function quizHeader(time) {
   `;
 }
 
+function renderHint(question) {
+  if (question.hintText) return `<p class="hint-text">${escapeHtml(question.hintText)}</p>`;
+  return `<button class="ghost" data-hint>Hint</button>`;
+}
+
+function buildHint(country, mode) {
+  if (mode === "reverse") {
+    const pattern = new RegExp(country.nameCommon.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    const description = (country.flagAlt || "").replace(pattern, "this country");
+    if (description && !/^Flag of /i.test(description)) return description;
+  }
+  const where = country.subregion || country.region;
+  const capital = country.capital ? ` Its capital starts with "${country.capital[0]}".` : "";
+  return `This country is in ${where}.${capital}`;
+}
+
 function answerFeedback(question) {
   const country = question.country;
   return `
     <div class="feedback ${question.correct ? "correct" : "wrong"}">
-      <strong>${question.correct ? "Correct" : `Answer: ${country.nameCommon}`}</strong>
+      <strong>${state.progress.settings.colorAssist ? (question.correct ? "✓ " : "✗ ") : ""}${question.correct ? "Correct" : `Answer: ${country.nameCommon}`}</strong>
       <p>${country.memoryHint}</p>
       ${miniMap(country)}
       <div class="actions">
@@ -1832,11 +1850,9 @@ function buildChoices(country, preferSimilar = false) {
 }
 
 function buildCapitalChoices(country) {
-  const capitals = eligibleCountries()
-    .map((item) => item.capital)
-    .filter(Boolean)
-    .filter((capital) => capital !== country.capital);
-  return shuffle([country.capital || country.nameCommon, ...shuffle(capitals).slice(0, 3)]);
+  const answer = country.capital || country.nameCommon;
+  const capitals = [...new Set(eligibleCountries().map((item) => item.capital).filter(Boolean))].filter((capital) => capital !== answer);
+  return shuffle([answer, ...shuffle(capitals).slice(0, 3)]);
 }
 
 function answerQuestion(iso) {
@@ -1872,10 +1888,11 @@ function answerMap(event) {
   const y = ((event.clientY - rect.top) / rect.height) * 100;
   question.click = { x, y };
   const target = mapPosition(question.country);
-  const dx = x - target.x;
-  const dy = y - target.y;
-  const tolerance = question.country.areaKm2 < 1000 ? 11 : question.country.areaKm2 < 50000 ? 8 : 6;
-  const mapCorrect = Math.sqrt(dx * dx + dy * dy) <= tolerance;
+  // Compare in degrees (x% spans 360°, y% spans 180°) so the target is the same regardless of map aspect ratio.
+  const dLng = (x - target.x) * 3.6;
+  const dLat = (y - target.y) * 1.8;
+  const tolerance = question.country.areaKm2 < 1000 ? 28 : question.country.areaKm2 < 50000 ? 21 : 16;
+  const mapCorrect = Math.hypot(dLng, dLat) <= tolerance;
   if (quiz.mode === "ultimate") {
     question.stageCorrect.map = mapCorrect;
     finishQuestion(question, Object.values(question.stageCorrect).every(Boolean));
@@ -1899,8 +1916,37 @@ function finishQuestion(question, correct) {
     quiz.run = 0;
   }
   stopTimer();
+  playFeedbackTone(correct);
   saveProgress();
   render();
+}
+
+let audioContext = null;
+
+function playFeedbackTone(correct) {
+  if (!state.progress.settings.sound) return;
+  try {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    audioContext ||= new AudioCtor();
+    const now = audioContext.currentTime;
+    const notes = correct ? [660, 880] : [220, 165];
+    notes.forEach((frequency, index) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = correct ? "triangle" : "sawtooth";
+      oscillator.frequency.value = frequency;
+      const start = now + index * 0.09;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.12, start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.18);
+    });
+  } catch {
+    // Audio is optional.
+  }
 }
 
 function nextQuestion() {
@@ -2005,7 +2051,9 @@ function chooseMatch(id) {
     match.matched.push(card.iso3);
     match.correctPairs += 1;
     updateCountryProgress(card.iso3, true, 10, 0);
+    playFeedbackTone(true);
   } else {
+    playFeedbackTone(false);
     updateCountryProgress(match.selected.iso3, false, 10, 0);
     updateCountryProgress(card.iso3, false, 10, 0);
   }
@@ -2227,7 +2275,8 @@ function wireDynamicPieces() {
   document.querySelector("[data-hint]")?.addEventListener("click", () => {
     const question = state.quiz.questions[state.quiz.index];
     question.hints += 1;
-    alert(question.country.memoryHint);
+    question.hintText = buildHint(question.country, state.quiz.mode);
+    render();
   });
   document.querySelectorAll("[data-setting]").forEach((input) => {
     input.addEventListener("change", (event) => {

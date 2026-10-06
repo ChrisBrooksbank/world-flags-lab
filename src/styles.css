@@ -914,6 +914,28 @@ select {
   background: #fff0ef;
 }
 
+.choice .cue {
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.choice.correct .cue {
+  color: var(--ok);
+}
+
+.choice.wrong .cue {
+  color: var(--bad);
+}
+
+.hint-text {
+  margin: 1rem 0 0;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  border: 1px dashed var(--line);
+  background: rgba(242, 184, 75, 0.12);
+  font-weight: 700;
+}
+
 .choice-flag {
   width: 72px;
   height: 46px;

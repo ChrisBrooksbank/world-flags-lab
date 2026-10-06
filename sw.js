@@ -1,11 +1,11 @@
-const CACHE_NAME = "world-flags-lab-v20";
+const CACHE_NAME = "world-flags-lab-v21";
 const CORE_ASSETS = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icons/icon.svg",
-  "./src/app.js?v=20",
-  "./src/styles.css?v=20",
+  "./src/app.js?v=21",
+  "./src/styles.css?v=21",
   "./vendor/three.module.js",
   "./public/data/countries.json",
   "./public/maps/countries.geojson"
@@ -53,8 +53,10 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          }
           return response;
         })
         .catch(() => caches.match(event.request).then((cached) => cached || caches.match("./index.html")))
@@ -67,11 +69,13 @@ self.addEventListener("fetch", (event) => {
       if (cached) return cached;
       return fetch(event.request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          }
           return response;
         })
-        .catch(() => caches.match("./index.html"));
+        .catch(() => (event.request.mode === "navigate" ? caches.match("./index.html") : Response.error()));
     })
   );
 });
