@@ -36,10 +36,22 @@ const viewLabels = [
 
 function loadProgress() {
   try {
-    return JSON.parse(localStorage.getItem(STORE_KEY)) || freshProgress();
+    return normalizeProgress(JSON.parse(localStorage.getItem(STORE_KEY)));
   } catch {
     return freshProgress();
   }
+}
+
+function normalizeProgress(raw) {
+  const fresh = freshProgress();
+  if (!raw || typeof raw !== "object") return fresh;
+  return {
+    ...fresh,
+    ...raw,
+    answers: raw.answers && typeof raw.answers === "object" ? raw.answers : {},
+    rounds: Array.isArray(raw.rounds) ? raw.rounds : [],
+    settings: { ...fresh.settings, ...(raw.settings || {}) }
+  };
 }
 
 function freshProgress() {
@@ -61,7 +73,11 @@ function freshProgress() {
 }
 
 function saveProgress() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state.progress));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state.progress));
+  } catch {
+    // Storage can be full or blocked (private browsing); keep progress in memory.
+  }
 }
 
 async function boot() {
@@ -220,7 +236,7 @@ function renderHome() {
   const pool = eligibleCountries();
   const stats = progressStats(pool);
   const daily = dailyCountry(pool);
-  const weak = weakestCountries(pool).slice(0, 5);
+  const weak = reviewCountries(pool).slice(0, 5);
   return `
     <section class="hero-panel">
       <div>
@@ -246,7 +262,7 @@ function renderHome() {
       ${metric("Countries", pool.length)}
       ${metric("Mastered", stats.mastered)}
       ${metric("Accuracy", `${stats.accuracy}%`)}
-      ${metric("Study streak", `${state.progress.streak} days`)}
+      ${metric("Study streak", `${currentStreak()} days`)}
     </section>
 
     <section class="split">
@@ -426,7 +442,7 @@ function renderAtlas() {
 function renderProgress() {
   const pool = eligibleCountries();
   const stats = progressStats(pool);
-  const weak = weakestCountries(pool).slice(0, 12);
+  const weak = reviewCountries(pool).slice(0, 12);
   return `
     <section class="section-head">
       <div>
@@ -451,7 +467,7 @@ function renderProgress() {
       </div>
       <div>
         <h2>Review Queue</h2>
-        <div class="mini-list">${weak.map((country) => miniCountry(country, masteryFor(country.iso3))).join("")}</div>
+        <div class="mini-list">${weak.map((country) => miniCountry(country, masteryFor(country.iso3))).join("") || `<p class="muted">Nothing to review yet. Missed and shaky flags will appear here.</p>`}</div>
       </div>
     </section>
     <section>
@@ -1628,6 +1644,9 @@ function buildCountryNameLookup(countries) {
     "the bahamas": "Bahamas",
     "gambia": "Gambia",
     "falkland islands": "Falkland Islands",
+    "macedonia": "North Macedonia",
+    "united republic of tanzania": "Tanzania",
+    "west bank": "Palestine",
     "french southern and antarctic lands": "French Southern and Antarctic Lands"
   };
 
@@ -1772,7 +1791,7 @@ function quizPool(mode, seedIso) {
     return [seed, ...shuffle(eligibleCountries().filter((country) => country.iso3 !== seedIso)).slice(0, 9)];
   }
   if (mode === "mistakes") {
-    const weak = weakestCountries(eligibleCountries()).filter((country) => progressFor(country.iso3).seen);
+    const weak = reviewCountries(eligibleCountries()).slice(0, 10);
     return weak.length ? weak : eligibleCountries();
   }
   if (mode === "similar") {
@@ -1976,12 +1995,18 @@ function chooseMatch(id) {
     render();
     return;
   }
+  if (match.selected.type === card.type) {
+    match.selected = card;
+    render();
+    return;
+  }
   match.moves += 1;
-  if (match.selected.iso3 === card.iso3 && match.selected.type !== card.type) {
+  if (match.selected.iso3 === card.iso3) {
     match.matched.push(card.iso3);
     match.correctPairs += 1;
     updateCountryProgress(card.iso3, true, 10, 0);
   } else {
+    updateCountryProgress(match.selected.iso3, false, 10, 0);
     updateCountryProgress(card.iso3, false, 10, 0);
   }
   match.selected = null;
@@ -2043,17 +2068,40 @@ function weakestCountries(pool) {
   });
 }
 
+function localDateKey(date = new Date()) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function yesterdayKey() {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return localDateKey(date);
+}
+
+function currentStreak() {
+  const last = state.progress.lastStudyDate;
+  return last === localDateKey() || last === yesterdayKey() ? state.progress.streak : 0;
+}
+
+function reviewCountries(pool) {
+  return weakestCountries(pool).filter((country) => {
+    const item = progressFor(country.iso3);
+    return item.seen && (item.wrong > 0 || item.mastery < 80);
+  });
+}
+
 function dailyCountry(pool) {
-  const key = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  const key = localDateKey().replaceAll("-", "");
   const index = Number(key) % pool.length;
   return pool[index] || state.countries[0];
 }
 
 function markStudyDay() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   if (state.progress.lastStudyDate === today) return;
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  state.progress.streak = state.progress.lastStudyDate === yesterday ? state.progress.streak + 1 : 1;
+  state.progress.streak = state.progress.lastStudyDate === yesterdayKey() ? state.progress.streak + 1 : 1;
   state.progress.bestStreak = Math.max(state.progress.bestStreak, state.progress.streak);
   state.progress.lastStudyDate = today;
 }
@@ -2072,9 +2120,10 @@ async function importProgress(file) {
   if (!file) return;
   const text = await file.text();
   const imported = JSON.parse(text);
-  if (!imported.answers || !imported.settings) throw new Error("Invalid progress file");
-  state.progress = imported;
-  state.scope = imported.settings.scope || "core";
+  if (!imported?.answers || !imported.settings) throw new Error("Invalid progress file");
+  state.progress = normalizeProgress(imported);
+  state.scope = state.progress.settings.scope || "core";
+  state.globeSpin = Boolean(state.progress.settings.globeSpin);
   saveProgress();
   render();
 }
@@ -2197,13 +2246,19 @@ function wireDynamicPieces() {
     if (confirm("Reset all local progress?")) {
       state.progress = freshProgress();
       state.scope = "core";
+      state.globeSpin = false;
       saveProgress();
       render();
     }
   });
   document.querySelector("[data-export-progress]")?.addEventListener("click", exportProgress);
   document.querySelector("[data-import-progress]")?.addEventListener("change", (event) => {
-    importProgress(event.target.files[0]).catch((error) => alert(error.message));
+    const input = event.target;
+    importProgress(input.files[0])
+      .catch((error) => alert(error.message))
+      .finally(() => {
+        input.value = "";
+      });
   });
 }
 
