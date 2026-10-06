@@ -89,8 +89,9 @@ async function boot() {
 function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
     let updateReloading = false;
+    const hadController = Boolean(navigator.serviceWorker.controller);
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (updateReloading) return;
+      if (updateReloading || !hadController) return;
       showUpdatePrompt({ reloadOnly: true });
     });
     navigator.serviceWorker
@@ -169,6 +170,7 @@ function regions() {
 }
 
 function render() {
+  if (!state.quiz) stopTimer();
   disposeGlobe();
   state.filtered = filteredCountries();
   if (!state.globeIso && state.filtered[0]) state.globeIso = dailyCountry(eligibleCountries()).iso3;
@@ -554,15 +556,18 @@ function renderQuiz() {
   if (quiz.mode === "map") return renderMapQuestion(question, time);
   if (quiz.mode === "ultimate") return renderUltimateQuestion(question, time);
 
-  const prompt = quiz.mode === "reverse" ? `<h2>${country.nameCommon}</h2>` : `${flagImg(country, quiz.mode === "blur" && !answered ? "quiz-flag blurred" : "quiz-flag")}`;
+  const prompt =
+    quiz.mode === "reverse"
+      ? `<h2>${country.nameCommon}</h2>`
+      : quizFlagImg(country, quiz.mode === "blur" && !answered ? "quiz-flag blurred" : "quiz-flag", answered);
   const choices = question.choices
-    .map((choice) => {
+    .map((choice, index) => {
       const isCorrect = answered && choice.iso3 === country.iso3;
       const isWrong = answered && choice.iso3 === question.selectedIso && choice.iso3 !== country.iso3;
       return `
         <button class="choice ${isCorrect ? "correct" : ""} ${isWrong ? "wrong" : ""}" data-answer="${choice.iso3}" ${answered ? "disabled" : ""}>
-          ${quiz.mode === "reverse" ? flagImg(choice, "choice-flag") : ""}
-          <span>${choice.nameCommon}</span>
+          ${quiz.mode === "reverse" ? quizFlagImg(choice, "choice-flag", answered, `Flag option ${index + 1}`) : ""}
+          ${quiz.mode !== "reverse" || answered ? `<span>${choice.nameCommon}</span>` : ""}
         </button>
       `;
     })
@@ -585,7 +590,7 @@ function renderMapQuestion(question, time) {
     <section class="quiz-shell">
       ${quizHeader(time)}
       <div class="question-card">
-        <div class="prompt">${flagImg(question.country, "quiz-flag")}<h2>Tap ${question.country.nameCommon} on the mini world map</h2></div>
+        <div class="prompt">${quizFlagImg(question.country, "quiz-flag", question.answered)}<h2>Tap ${question.country.nameCommon} on the mini world map</h2></div>
         ${interactiveMap(question)}
         ${question.answered ? answerFeedback(question) : `<p class="muted">Use the continent and ocean labels as guides. A close tap counts; tiny countries use a generous target.</p>`}
       </div>
@@ -600,7 +605,7 @@ function renderUltimateQuestion(question, time) {
     <section class="quiz-shell">
       ${quizHeader(time)}
       <div class="question-card">
-        <div class="prompt">${flagImg(question.country, "quiz-flag")}</div>
+        <div class="prompt">${quizFlagImg(question.country, "quiz-flag", stage !== "identify")}</div>
         ${
           stage === "identify"
             ? `<h2>Identify the country</h2><div class="choices">${question.choices.map((choice) => `<button class="choice" data-answer="${choice.iso3}">${choice.nameCommon}</button>`).join("")}</div>`
@@ -750,6 +755,11 @@ function miniCountry(country, mastery) {
 
 function flagImg(country, className) {
   return `<img class="${className}" src="${country.flagSvgPath}" alt="${escapeAttr(country.flagAlt || `Flag of ${country.nameCommon}`)}" loading="lazy" />`;
+}
+
+function quizFlagImg(country, className, reveal, hiddenAlt = "Mystery flag") {
+  if (reveal) return flagImg(country, className);
+  return `<img class="${className}" src="${country.flagSvgPath}" alt="${escapeAttr(hiddenAlt)}" />`;
 }
 
 function miniMap(country) {
@@ -1910,6 +1920,10 @@ function startTimer() {
   const quiz = state.quiz;
   if (!quiz || quiz.finished || quiz.kind !== "test" || !state.progress.settings.timer) return;
   quiz.timerId = window.setInterval(() => {
+    if (state.quiz !== quiz) {
+      clearInterval(quiz.timerId);
+      return;
+    }
     quiz.timeLeft -= 1;
     const timer = document.querySelector(".timer");
     if (timer) timer.textContent = `${quiz.timeLeft}s`;
@@ -1918,13 +1932,15 @@ function startTimer() {
       if (!question.answered) finishQuestion(question, false);
     }
   }, 1000);
+  activeTimerId = quiz.timerId;
 }
 
+let activeTimerId = null;
+
 function stopTimer() {
-  if (state.quiz?.timerId) {
-    clearInterval(state.quiz.timerId);
-    state.quiz.timerId = null;
-  }
+  if (activeTimerId) clearInterval(activeTimerId);
+  activeTimerId = null;
+  if (state.quiz) state.quiz.timerId = null;
 }
 
 function startMatch(kind = "practice") {
@@ -1934,8 +1950,8 @@ function startMatch(kind = "practice") {
   state.match = {
     kind,
     pairs: pool.map((country) => country.iso3),
-    flagCards: pool.map((country, index) => ({ id: `flag-${country.iso3}`, iso3: country.iso3, type: "flag", sort: Math.random() + index })),
-    nameCards: pool.map((country, index) => ({ id: `name-${country.iso3}`, iso3: country.iso3, type: "name", sort: Math.random() + index })),
+    flagCards: pool.map((country) => ({ id: `flag-${country.iso3}`, iso3: country.iso3, type: "flag", sort: Math.random() })),
+    nameCards: pool.map((country) => ({ id: `name-${country.iso3}`, iso3: country.iso3, type: "name", sort: Math.random() })),
     selected: null,
     matched: [],
     moves: 0,
@@ -2192,7 +2208,12 @@ function wireDynamicPieces() {
 }
 
 function shuffle(items) {
-  return [...items].sort(() => Math.random() - 0.5);
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swap]] = [copy[swap], copy[index]];
+  }
+  return copy;
 }
 
 function clamp(value, min, max) {
