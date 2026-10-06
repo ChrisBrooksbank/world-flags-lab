@@ -36,10 +36,22 @@ const viewLabels = [
 
 function loadProgress() {
   try {
-    return JSON.parse(localStorage.getItem(STORE_KEY)) || freshProgress();
+    return normalizeProgress(JSON.parse(localStorage.getItem(STORE_KEY)));
   } catch {
     return freshProgress();
   }
+}
+
+function normalizeProgress(raw) {
+  const fresh = freshProgress();
+  if (!raw || typeof raw !== "object") return fresh;
+  return {
+    ...fresh,
+    ...raw,
+    answers: raw.answers && typeof raw.answers === "object" ? raw.answers : {},
+    rounds: Array.isArray(raw.rounds) ? raw.rounds : [],
+    settings: { ...fresh.settings, ...(raw.settings || {}) }
+  };
 }
 
 function freshProgress() {
@@ -61,7 +73,11 @@ function freshProgress() {
 }
 
 function saveProgress() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state.progress));
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state.progress));
+  } catch {
+    // Storage can be full or blocked (private browsing); keep progress in memory.
+  }
 }
 
 async function boot() {
@@ -89,8 +105,9 @@ async function boot() {
 function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
     let updateReloading = false;
+    const hadController = Boolean(navigator.serviceWorker.controller);
     navigator.serviceWorker.addEventListener("controllerchange", () => {
-      if (updateReloading) return;
+      if (updateReloading || !hadController) return;
       showUpdatePrompt({ reloadOnly: true });
     });
     navigator.serviceWorker
@@ -169,6 +186,7 @@ function regions() {
 }
 
 function render() {
+  if (!state.quiz) stopTimer();
   disposeGlobe();
   state.filtered = filteredCountries();
   if (!state.globeIso && state.filtered[0]) state.globeIso = dailyCountry(eligibleCountries()).iso3;
@@ -218,7 +236,7 @@ function renderHome() {
   const pool = eligibleCountries();
   const stats = progressStats(pool);
   const daily = dailyCountry(pool);
-  const weak = weakestCountries(pool).slice(0, 5);
+  const weak = reviewCountries(pool).slice(0, 5);
   return `
     <section class="hero-panel">
       <div>
@@ -244,7 +262,7 @@ function renderHome() {
       ${metric("Countries", pool.length)}
       ${metric("Mastered", stats.mastered)}
       ${metric("Accuracy", `${stats.accuracy}%`)}
-      ${metric("Study streak", `${state.progress.streak} days`)}
+      ${metric("Study streak", `${currentStreak()} days`)}
     </section>
 
     <section class="split">
@@ -424,7 +442,7 @@ function renderAtlas() {
 function renderProgress() {
   const pool = eligibleCountries();
   const stats = progressStats(pool);
-  const weak = weakestCountries(pool).slice(0, 12);
+  const weak = reviewCountries(pool).slice(0, 12);
   return `
     <section class="section-head">
       <div>
@@ -449,7 +467,7 @@ function renderProgress() {
       </div>
       <div>
         <h2>Review Queue</h2>
-        <div class="mini-list">${weak.map((country) => miniCountry(country, masteryFor(country.iso3))).join("")}</div>
+        <div class="mini-list">${weak.map((country) => miniCountry(country, masteryFor(country.iso3))).join("") || `<p class="muted">Nothing to review yet. Missed and shaky flags will appear here.</p>`}</div>
       </div>
     </section>
     <section>
@@ -554,15 +572,20 @@ function renderQuiz() {
   if (quiz.mode === "map") return renderMapQuestion(question, time);
   if (quiz.mode === "ultimate") return renderUltimateQuestion(question, time);
 
-  const prompt = quiz.mode === "reverse" ? `<h2>${country.nameCommon}</h2>` : `${flagImg(country, quiz.mode === "blur" && !answered ? "quiz-flag blurred" : "quiz-flag")}`;
+  const prompt =
+    quiz.mode === "reverse"
+      ? `<h2>${country.nameCommon}</h2>`
+      : quizFlagImg(country, quiz.mode === "blur" && !answered ? "quiz-flag blurred" : "quiz-flag", answered);
   const choices = question.choices
-    .map((choice) => {
+    .map((choice, index) => {
       const isCorrect = answered && choice.iso3 === country.iso3;
       const isWrong = answered && choice.iso3 === question.selectedIso && choice.iso3 !== country.iso3;
+      const cue = state.progress.settings.colorAssist && (isCorrect || isWrong) ? `<span class="cue">${isCorrect ? "✓ Correct" : "✗ Your pick"}</span>` : "";
       return `
         <button class="choice ${isCorrect ? "correct" : ""} ${isWrong ? "wrong" : ""}" data-answer="${choice.iso3}" ${answered ? "disabled" : ""}>
-          ${quiz.mode === "reverse" ? flagImg(choice, "choice-flag") : ""}
-          <span>${choice.nameCommon}</span>
+          ${quiz.mode === "reverse" ? quizFlagImg(choice, "choice-flag", answered, `Flag option ${index + 1}`) : ""}
+          ${quiz.mode !== "reverse" || answered ? `<span>${choice.nameCommon}</span>` : ""}
+          ${cue}
         </button>
       `;
     })
@@ -574,7 +597,7 @@ function renderQuiz() {
       <div class="question-card">
         <div class="prompt">${prompt}</div>
         <div class="choices">${choices}</div>
-        ${answered ? answerFeedback(question) : `<button class="ghost" data-hint>Hint</button>`}
+        ${answered ? answerFeedback(question) : renderHint(question)}
       </div>
     </section>
   `;
@@ -585,7 +608,7 @@ function renderMapQuestion(question, time) {
     <section class="quiz-shell">
       ${quizHeader(time)}
       <div class="question-card">
-        <div class="prompt">${flagImg(question.country, "quiz-flag")}<h2>Tap ${question.country.nameCommon} on the mini world map</h2></div>
+        <div class="prompt">${quizFlagImg(question.country, "quiz-flag", question.answered)}<h2>Tap ${question.country.nameCommon} on the mini world map</h2></div>
         ${interactiveMap(question)}
         ${question.answered ? answerFeedback(question) : `<p class="muted">Use the continent and ocean labels as guides. A close tap counts; tiny countries use a generous target.</p>`}
       </div>
@@ -600,7 +623,7 @@ function renderUltimateQuestion(question, time) {
     <section class="quiz-shell">
       ${quizHeader(time)}
       <div class="question-card">
-        <div class="prompt">${flagImg(question.country, "quiz-flag")}</div>
+        <div class="prompt">${quizFlagImg(question.country, "quiz-flag", stage !== "identify")}</div>
         ${
           stage === "identify"
             ? `<h2>Identify the country</h2><div class="choices">${question.choices.map((choice) => `<button class="choice" data-answer="${choice.iso3}">${choice.nameCommon}</button>`).join("")}</div>`
@@ -750,6 +773,11 @@ function miniCountry(country, mastery) {
 
 function flagImg(country, className) {
   return `<img class="${className}" src="${country.flagSvgPath}" alt="${escapeAttr(country.flagAlt || `Flag of ${country.nameCommon}`)}" loading="lazy" />`;
+}
+
+function quizFlagImg(country, className, reveal, hiddenAlt = "Mystery flag") {
+  if (reveal) return flagImg(country, className);
+  return `<img class="${className}" src="${country.flagSvgPath}" alt="${escapeAttr(hiddenAlt)}" />`;
 }
 
 function miniMap(country) {
@@ -1618,6 +1646,9 @@ function buildCountryNameLookup(countries) {
     "the bahamas": "Bahamas",
     "gambia": "Gambia",
     "falkland islands": "Falkland Islands",
+    "macedonia": "North Macedonia",
+    "united republic of tanzania": "Tanzania",
+    "west bank": "Palestine",
     "french southern and antarctic lands": "French Southern and Antarctic Lands"
   };
 
@@ -1710,11 +1741,27 @@ function quizHeader(time) {
   `;
 }
 
+function renderHint(question) {
+  if (question.hintText) return `<p class="hint-text">${escapeHtml(question.hintText)}</p>`;
+  return `<button class="ghost" data-hint>Hint</button>`;
+}
+
+function buildHint(country, mode) {
+  if (mode === "reverse") {
+    const pattern = new RegExp(country.nameCommon.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    const description = (country.flagAlt || "").replace(pattern, "this country");
+    if (description && !/^Flag of /i.test(description)) return description;
+  }
+  const where = country.subregion || country.region;
+  const capital = country.capital ? ` Its capital starts with "${country.capital[0]}".` : "";
+  return `This country is in ${where}.${capital}`;
+}
+
 function answerFeedback(question) {
   const country = question.country;
   return `
     <div class="feedback ${question.correct ? "correct" : "wrong"}">
-      <strong>${question.correct ? "Correct" : `Answer: ${country.nameCommon}`}</strong>
+      <strong>${state.progress.settings.colorAssist ? (question.correct ? "✓ " : "✗ ") : ""}${question.correct ? "Correct" : `Answer: ${country.nameCommon}`}</strong>
       <p>${country.memoryHint}</p>
       ${miniMap(country)}
       <div class="actions">
@@ -1762,7 +1809,7 @@ function quizPool(mode, seedIso) {
     return [seed, ...shuffle(eligibleCountries().filter((country) => country.iso3 !== seedIso)).slice(0, 9)];
   }
   if (mode === "mistakes") {
-    const weak = weakestCountries(eligibleCountries()).filter((country) => progressFor(country.iso3).seen);
+    const weak = reviewCountries(eligibleCountries()).slice(0, 10);
     return weak.length ? weak : eligibleCountries();
   }
   if (mode === "similar") {
@@ -1803,11 +1850,9 @@ function buildChoices(country, preferSimilar = false) {
 }
 
 function buildCapitalChoices(country) {
-  const capitals = eligibleCountries()
-    .map((item) => item.capital)
-    .filter(Boolean)
-    .filter((capital) => capital !== country.capital);
-  return shuffle([country.capital || country.nameCommon, ...shuffle(capitals).slice(0, 3)]);
+  const answer = country.capital || country.nameCommon;
+  const capitals = [...new Set(eligibleCountries().map((item) => item.capital).filter(Boolean))].filter((capital) => capital !== answer);
+  return shuffle([answer, ...shuffle(capitals).slice(0, 3)]);
 }
 
 function answerQuestion(iso) {
@@ -1843,10 +1888,11 @@ function answerMap(event) {
   const y = ((event.clientY - rect.top) / rect.height) * 100;
   question.click = { x, y };
   const target = mapPosition(question.country);
-  const dx = x - target.x;
-  const dy = y - target.y;
-  const tolerance = question.country.areaKm2 < 1000 ? 11 : question.country.areaKm2 < 50000 ? 8 : 6;
-  const mapCorrect = Math.sqrt(dx * dx + dy * dy) <= tolerance;
+  // Compare in degrees (x% spans 360°, y% spans 180°) so the target is the same regardless of map aspect ratio.
+  const dLng = (x - target.x) * 3.6;
+  const dLat = (y - target.y) * 1.8;
+  const tolerance = question.country.areaKm2 < 1000 ? 28 : question.country.areaKm2 < 50000 ? 21 : 16;
+  const mapCorrect = Math.hypot(dLng, dLat) <= tolerance;
   if (quiz.mode === "ultimate") {
     question.stageCorrect.map = mapCorrect;
     finishQuestion(question, Object.values(question.stageCorrect).every(Boolean));
@@ -1870,8 +1916,37 @@ function finishQuestion(question, correct) {
     quiz.run = 0;
   }
   stopTimer();
+  playFeedbackTone(correct);
   saveProgress();
   render();
+}
+
+let audioContext = null;
+
+function playFeedbackTone(correct) {
+  if (!state.progress.settings.sound) return;
+  try {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    audioContext ||= new AudioCtor();
+    const now = audioContext.currentTime;
+    const notes = correct ? [660, 880] : [220, 165];
+    notes.forEach((frequency, index) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = correct ? "triangle" : "sawtooth";
+      oscillator.frequency.value = frequency;
+      const start = now + index * 0.09;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.12, start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.18);
+    });
+  } catch {
+    // Audio is optional.
+  }
 }
 
 function nextQuestion() {
@@ -1910,6 +1985,10 @@ function startTimer() {
   const quiz = state.quiz;
   if (!quiz || quiz.finished || quiz.kind !== "test" || !state.progress.settings.timer) return;
   quiz.timerId = window.setInterval(() => {
+    if (state.quiz !== quiz) {
+      clearInterval(quiz.timerId);
+      return;
+    }
     quiz.timeLeft -= 1;
     const timer = document.querySelector(".timer");
     if (timer) timer.textContent = `${quiz.timeLeft}s`;
@@ -1918,13 +1997,15 @@ function startTimer() {
       if (!question.answered) finishQuestion(question, false);
     }
   }, 1000);
+  activeTimerId = quiz.timerId;
 }
 
+let activeTimerId = null;
+
 function stopTimer() {
-  if (state.quiz?.timerId) {
-    clearInterval(state.quiz.timerId);
-    state.quiz.timerId = null;
-  }
+  if (activeTimerId) clearInterval(activeTimerId);
+  activeTimerId = null;
+  if (state.quiz) state.quiz.timerId = null;
 }
 
 function startMatch(kind = "practice") {
@@ -1934,8 +2015,8 @@ function startMatch(kind = "practice") {
   state.match = {
     kind,
     pairs: pool.map((country) => country.iso3),
-    flagCards: pool.map((country, index) => ({ id: `flag-${country.iso3}`, iso3: country.iso3, type: "flag", sort: Math.random() + index })),
-    nameCards: pool.map((country, index) => ({ id: `name-${country.iso3}`, iso3: country.iso3, type: "name", sort: Math.random() + index })),
+    flagCards: pool.map((country) => ({ id: `flag-${country.iso3}`, iso3: country.iso3, type: "flag", sort: Math.random() })),
+    nameCards: pool.map((country) => ({ id: `name-${country.iso3}`, iso3: country.iso3, type: "name", sort: Math.random() })),
     selected: null,
     matched: [],
     moves: 0,
@@ -1960,12 +2041,20 @@ function chooseMatch(id) {
     render();
     return;
   }
+  if (match.selected.type === card.type) {
+    match.selected = card;
+    render();
+    return;
+  }
   match.moves += 1;
-  if (match.selected.iso3 === card.iso3 && match.selected.type !== card.type) {
+  if (match.selected.iso3 === card.iso3) {
     match.matched.push(card.iso3);
     match.correctPairs += 1;
     updateCountryProgress(card.iso3, true, 10, 0);
+    playFeedbackTone(true);
   } else {
+    playFeedbackTone(false);
+    updateCountryProgress(match.selected.iso3, false, 10, 0);
     updateCountryProgress(card.iso3, false, 10, 0);
   }
   match.selected = null;
@@ -2027,17 +2116,40 @@ function weakestCountries(pool) {
   });
 }
 
+function localDateKey(date = new Date()) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function yesterdayKey() {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  return localDateKey(date);
+}
+
+function currentStreak() {
+  const last = state.progress.lastStudyDate;
+  return last === localDateKey() || last === yesterdayKey() ? state.progress.streak : 0;
+}
+
+function reviewCountries(pool) {
+  return weakestCountries(pool).filter((country) => {
+    const item = progressFor(country.iso3);
+    return item.seen && (item.wrong > 0 || item.mastery < 80);
+  });
+}
+
 function dailyCountry(pool) {
-  const key = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+  const key = localDateKey().replaceAll("-", "");
   const index = Number(key) % pool.length;
   return pool[index] || state.countries[0];
 }
 
 function markStudyDay() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDateKey();
   if (state.progress.lastStudyDate === today) return;
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  state.progress.streak = state.progress.lastStudyDate === yesterday ? state.progress.streak + 1 : 1;
+  state.progress.streak = state.progress.lastStudyDate === yesterdayKey() ? state.progress.streak + 1 : 1;
   state.progress.bestStreak = Math.max(state.progress.bestStreak, state.progress.streak);
   state.progress.lastStudyDate = today;
 }
@@ -2056,9 +2168,10 @@ async function importProgress(file) {
   if (!file) return;
   const text = await file.text();
   const imported = JSON.parse(text);
-  if (!imported.answers || !imported.settings) throw new Error("Invalid progress file");
-  state.progress = imported;
-  state.scope = imported.settings.scope || "core";
+  if (!imported?.answers || !imported.settings) throw new Error("Invalid progress file");
+  state.progress = normalizeProgress(imported);
+  state.scope = state.progress.settings.scope || "core";
+  state.globeSpin = Boolean(state.progress.settings.globeSpin);
   saveProgress();
   render();
 }
@@ -2162,7 +2275,8 @@ function wireDynamicPieces() {
   document.querySelector("[data-hint]")?.addEventListener("click", () => {
     const question = state.quiz.questions[state.quiz.index];
     question.hints += 1;
-    alert(question.country.memoryHint);
+    question.hintText = buildHint(question.country, state.quiz.mode);
+    render();
   });
   document.querySelectorAll("[data-setting]").forEach((input) => {
     input.addEventListener("change", (event) => {
@@ -2181,18 +2295,29 @@ function wireDynamicPieces() {
     if (confirm("Reset all local progress?")) {
       state.progress = freshProgress();
       state.scope = "core";
+      state.globeSpin = false;
       saveProgress();
       render();
     }
   });
   document.querySelector("[data-export-progress]")?.addEventListener("click", exportProgress);
   document.querySelector("[data-import-progress]")?.addEventListener("change", (event) => {
-    importProgress(event.target.files[0]).catch((error) => alert(error.message));
+    const input = event.target;
+    importProgress(input.files[0])
+      .catch((error) => alert(error.message))
+      .finally(() => {
+        input.value = "";
+      });
   });
 }
 
 function shuffle(items) {
-  return [...items].sort(() => Math.random() - 0.5);
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swap]] = [copy[swap], copy[index]];
+  }
+  return copy;
 }
 
 function clamp(value, min, max) {
